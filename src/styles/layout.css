@@ -1,0 +1,201 @@
+.app-shell {
+  display: grid;
+  grid-template-areas:
+    'toolbar toolbar'
+    'main panel'
+    'filmstrip filmstrip';
+  grid-template-columns: minmax(0, 1fr) var(--panel-width);
+  grid-template-rows: var(--toolbar-height) minmax(0, 1fr) auto;
+  width: 100%;
+  height: 100%;
+}
+
+.app-shell__main {
+  grid-area: main;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-canvas);
+  display: flex;
+  flex-direction: column;
+}
+
+.app-shell__panel {
+  grid-area: panel;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  overflow-y: auto;
+}
+
+.app-shell__error {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: rgba(30, 12, 12, 0.94);
+  max-width: 80%;
+}
+
+/* ---------- 顶部工具栏 ---------- */
+
+.toolbar {
+  grid-area: toolbar;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.toolbar__group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.toolbar__group--center {
+  flex: 1;
+  justify-content: center;
+}
+
+.toolbar__folder {
+  color: var(--text-dim);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar__counter {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 中央大图 ---------- */
+
+.image-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-area--message {
+  padding: 24px;
+}
+
+.image-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.image-canvas--grabbable {
+  cursor: grab;
+}
+
+.image-canvas--grabbable:active {
+  cursor: grabbing;
+}
+
+.image-area__overlay {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--text-dim);
+}
+
+/* ---------- 底部缩略图条 ---------- */
+
+.filmstrip {
+  grid-area: filmstrip;
+  position: relative;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  height: var(--filmstrip-height);
+}
+
+.filmstrip__track {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 8px 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.filmstrip__status {
+  position: absolute;
+  right: 10px;
+  top: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 92px;
+  height: 92px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  cursor: pointer;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thumb:hover {
+  border-color: var(--border-strong);
+}
+
+.thumb--active {
+  border-color: var(--accent);
+}
+
+.thumb__image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb__placeholder {
+  color: var(--text-faint);
+  font-size: 18px;
+}
+
+.thumb__placeholder.is-failed {
+  color: var(--danger);
+}
+
+.thumb__badge {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
