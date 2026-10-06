@@ -258,7 +258,9 @@ describe('raw-decoder.worker 的 ProPhoto linear 输出', () => {
     expect(calls).toContain('setGamma(0,1)');
     expect(calls).toContain('setGamma(1,1)');
     expect(calls).toContain('setNoAutoBright(1)');
-    expect(calls).toContain('setHighlight(2)');
+    // 必须是 clip(0)：unclip/blend 会把整幅图等比压暗约一档来腾高光空间，
+    // 线性中间产物扛不住（实测线性能量只剩 0.438 倍）
+    expect(calls).toContain('setHighlight(0)');
   });
 
   it('线性参数在 unpack 之前设置', async () => {

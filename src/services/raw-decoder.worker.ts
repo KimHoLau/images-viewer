@@ -73,8 +73,22 @@ const OUTPUT_BPS_SRGB = 8;
 /** ProPhoto linear 路径的位深：16 位，保住 Log 转换需要的动态范围 */
 const OUTPUT_BPS_HI = 16;
 
-/** LibRaw 高光处理方式：0=clip，1=unclip，2=blend */
-const HIGHLIGHT_BLEND = 2;
+/**
+ * LibRaw 高光处理方式：0=clip，1=unclip，2=blend。
+ *
+ * Log 路径必须用 clip。1 与 2 都属于「高光恢复」，代价是把整幅图按最大值等比压暗，
+ * 这样才腾得出空间放回被压平的高光——blend 的说明就是「会自动把输出曝光降低约一档」。
+ * 对图像渲染这是可接受的取舍，对「线性光中间产物」则是致命的：
+ *
+ * - 实测同一张 IMGP2971.DNG，highlight=1/2 出来的线性能量只有 clip 的 0.438 倍
+ *   （约 -1.19 档），画面整体发灰发暗、饱和度同时被压低；
+ * - 这个缩放发生在 LUT 之前，而 Log→显示 LUT 是非线性的，于是中间灰偏离标称位置，
+ *   曝光滑块也补不回原状；
+ * - 本片源几乎没有撞顶像素（clip 之后 0.00005% 到顶），根本没有高光需要恢复。
+ *
+ * 所以这里显式用 clip：保住线性关系，高光该夹就夹。
+ */
+const HIGHLIGHT_CLIP = 0;
 
 function decode(request: RawDecodeRequest, decoder: LibRaw): DecodedRawResult {
   const { id, buffer, options } = request;
@@ -90,11 +104,12 @@ function decode(request: RawDecodeRequest, decoder: LibRaw): DecodedRawResult {
   if (linearProPhoto) {
     // output_color 只决定色域，不决定传递函数：LibRaw 默认仍然套 sRGB 曲线。
     // gamma(1,1) 才是恒等曲线，出来的是线性光；auto_bright 是给显示看的直方图拉伸，
-    // 会把线性关系拉歪，所以关掉。高光用 blend，避免先死白再进 Log。
+    // 会把线性关系拉歪，所以关掉。高光用 clip：blend/unclip 会把整幅图等比压暗
+    // 约一档来腾出高光空间，线性中间产物扛不住这个缩放（见 HIGHLIGHT_CLIP 的说明）。
     decoder.setGamma(0, 1);
     decoder.setGamma(1, 1);
     decoder.setNoAutoBright(1);
-    decoder.setHighlight(HIGHLIGHT_BLEND);
+    decoder.setHighlight(HIGHLIGHT_CLIP);
   }
 
   if (options?.halfSize) decoder.setHalfSize(1);

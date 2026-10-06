@@ -7,3 +7,5 @@ coverage
 *.tsbuildinfo
 # 本地调试用的素材（RAW / LUT），体积大且通常是别人拍的片，不进仓库
 samples/
+# DSH 的 issue-tracker 插件缓存（本地会话状态，含服务端 issue 快照与日志）
+.dsh-mattskillsdeck-cache/
