@@ -335,8 +335,10 @@ export class ImageRenderer {
     const inputLinearLocation = this.uniformLocations.get('u_inputLinear');
     if (inputLinearLocation) gl.uniform1f(inputLinearLocation, this.inputLinear ? 1 : 0);
 
+    // int 类型的 uniform 必须用 uniform1i：用 uniform1f 会因类型不匹配报
+    // INVALID_OPERATION，而且只是静默置位——画面看起来「没坏」，模式却切不动
     const logModeLocation = this.uniformLocations.get('u_logMode');
-    if (logModeLocation) gl.uniform1f(logModeLocation, this.logMode ? 1 : 0);
+    if (logModeLocation) gl.uniform1i(logModeLocation, this.logMode ? 1 : 0);
 
     if (this.logMode) {
       const curveLocation = this.uniformLocations.get('u_logCurveId');

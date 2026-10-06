@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeFileEntry } from '../test/fixtures';
-import { ImageLoader, releaseLoadedImage } from './image-loader';
+import { ImageLoader, releaseLoadedImage, type LoadedImage } from './image-loader';
 
 const { decode } = vi.hoisted(() => ({ decode: vi.fn() }));
 
@@ -29,6 +29,18 @@ function fakeBitmap(width = 6000, height = 4000) {
   return { width, height, close: vi.fn() } as unknown as ImageBitmap;
 }
 
+/** 断言是位图并收窄类型，省得每条用例都写一遍判断 */
+function expectBitmap(loaded: LoadedImage): Extract<LoadedImage, { source: 'bitmap' }> {
+  if (loaded.source !== 'bitmap') throw new Error(`应当是位图，实际是 ${loaded.source}`);
+  return loaded;
+}
+
+/** 断言是浮点线性并收窄类型 */
+function expectLinear(loaded: LoadedImage): Extract<LoadedImage, { source: 'linear' }> {
+  if (loaded.source !== 'linear') throw new Error(`应当是浮点线性，实际是 ${loaded.source}`);
+  return loaded;
+}
+
 beforeEach(() => {
   decode.mockReset();
   vi.stubGlobal(
@@ -42,12 +54,11 @@ afterEach(() => {
 });
 
 describe('ImageLoader', () => {
-  it('常规图片走浏览器解码，且不带线性数据', async () => {
+  it('常规图片走浏览器解码', async () => {
     const loaded = await new ImageLoader().load(makeFileEntry('shot.jpg'));
 
     expect(decode).not.toHaveBeenCalled();
-    expect(loaded.bitmap).not.toBeNull();
-    expect(loaded.linear).toBeNull();
+    expectBitmap(loaded);
     expect(loaded.metadata).toBeNull();
   });
 
@@ -67,8 +78,7 @@ describe('ImageLoader', () => {
       useCameraWb: true,
       outputColor: 'srgb',
     });
-    expect(loaded.bitmap).not.toBeNull();
-    expect(loaded.linear).toBeNull();
+    expectBitmap(loaded);
     expect(loaded.metadata).toEqual(metadata);
   });
 
@@ -85,12 +95,30 @@ describe('ImageLoader', () => {
       useCameraWb: true,
       outputColor: 'prophoto-linear',
     });
+
     // 浮点数据不能塞进 ImageBitmap：8 位量化会毁掉 Log 转换要的动态范围
-    expect(loaded.bitmap).toBeNull();
+    const linear = expectLinear(loaded);
     expect(createImageBitmap).not.toHaveBeenCalled();
-    expect(loaded.linear).toEqual({ data: pixels, width: 1, height: 1 });
+    expect(linear.linear).toEqual({ data: pixels, width: 1, height: 1 });
     expect(loaded.width).toBe(1);
     expect(loaded.height).toBe(1);
+  });
+
+  it('没指定输出色彩空间时显式要 sRGB', async () => {
+    decode.mockResolvedValue({
+      format: 'rgba8',
+      pixels: new Uint8ClampedArray(4),
+      width: 2,
+      height: 2,
+      metadata,
+    });
+
+    await new ImageLoader().load(makeFileEntry('shot.cr2'));
+
+    expect(decode).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ outputColor: 'srgb' }),
+    );
   });
 
   it('解码失败时带上文件名', async () => {
@@ -115,11 +143,11 @@ describe('ImageLoader', () => {
 
 describe('releaseLoadedImage', () => {
   it('关闭位图', async () => {
-    const loaded = await new ImageLoader().load(makeFileEntry('shot.jpg'));
+    const loaded = expectBitmap(await new ImageLoader().load(makeFileEntry('shot.jpg')));
 
     releaseLoadedImage(loaded);
 
-    expect(loaded.bitmap?.close).toHaveBeenCalled();
+    expect(loaded.bitmap.close).toHaveBeenCalled();
   });
 
   it('没有图片时不报错', () => {

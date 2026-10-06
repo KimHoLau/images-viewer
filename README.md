@@ -115,14 +115,14 @@ chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=60000 \
   --dump-dom http://localhost:5211/webgl-check.html
 ```
 
-结果在 dump 出来的 `WEBGL-CHECK-BEGIN` / `WEBGL-CHECK-END` 之间，共 57 项：
+结果在 dump 出来的 `WEBGL-CHECK-BEGIN` / `WEBGL-CHECK-END` 之间，共 63 项：
 
 - 着色器编译链接、默认参数下管线是恒等变换
 - 12 组调整参数下 GPU 输出与 CPU 实现一致（最大偏差 2.9/255，即量化误差量级）
 - 3D LUT 轴向正确（用换通道 LUT 验）、预设 GPU 与 CPU 一致、黑白预设输出为灰
-- **Log 模式：14 个空间逐个比对 GPU 与 CPU 输出（偏差 ≤ 0.6/255）、与 LUT 预设组合一致、
-  LUT 强度 0 等于不套 LUT、关闭后退回原路径；另外读一次 GL 错误标志，
-  因为 uniform 类型不匹配只会静默置位、不抛异常**
+- **Log 模式：14 个空间逐个比对 GPU 与 CPU 输出（偏差 ≤ 0.6/255）、与全部 7 个 LUT 预设
+  逐一组合、LUT 强度 0 等于不套 LUT、屏幕读回的像素与离屏导出逐像素一致（0/255）、
+  关闭后退回原路径；另外读两次 GL 错误标志，因为 uniform 类型不匹配只会静默置位、不抛异常**
 - 离屏导出的尺寸、方向（readPixels 是左下原点，少翻一次就上下颠倒）、是否带上调整与 LUT
 - 导出编码成 JPEG/WebP/PNG 后能解码回来，尺寸与方向仍正确
 - 真实图片文件 → `ImageLoader` 解码 → 位图 → 渲染
@@ -150,8 +150,12 @@ chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=60000 \
 - **没有镜头校正与相机匹配提升**：Raw-Alchemy 在 Log 转换前还会做镜头校正与
   饱和度/对比度补偿，这两项不在范围内。
 - **Log 模式更吃显存与内存**：ProPhoto linear 走 `Float32Array` + `RGB16F` 纹理，
-  24MP 一张大约 288MB 主线程缓冲、144MB 显存。切换 Log 空间会重新解码一次 RAW，
-  大文件上能感觉到停顿。
+  24MP 一张大约 288MB 主线程缓冲、144MB 显存。从「关闭」切到某个 Log 空间会重新解码
+  一次 RAW，大文件上能感觉到停顿；在几个 Log 空间之间来回切则不会——解码参数只取决于
+  「是不是 RAW + Log 开没开」，这一点由 `useCurrentImage` 的依赖项保证。
+- **没有做帧率对比**：票 #21 要求测 Log 模式开/关的渲染帧率。Log 分支只多了几次
+  `log2`/`pow` 与两次 3×3 矩阵乘，理论上开销在噪声量级，但仓库里没有稳定的无头计时基准，
+  量出来的数字不可复现，所以宁可不写。真实 WebGL 那套检查覆盖的是正确性，不是性能。
 
 ## 部署
 

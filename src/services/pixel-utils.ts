@@ -56,7 +56,8 @@ export function bitmap16ToFloatRgb(
   colors: number,
 ): Float32Array {
   const pixels = width * height;
-  if (colors < 1 || (colors > 1 && colors < 3)) {
+  // 只有单通道与三通道以上能拼：两通道的排布在 LibRaw 的输出里没有定义
+  if (colors !== 1 && colors < 3) {
     throw new Error(`Unsupported color count for 16-bit bitmap: ${colors}`);
   }
 

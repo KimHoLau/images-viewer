@@ -130,7 +130,7 @@ void main() {
   color = mix(vec3(luma), color, 1.0 + u_saturation);
 
   vec3 display;
-  if (u_logMode > 0.5) {
+  if (u_logMode == 1) {
     // 6. Log 模式：线性光送进目标 Log 色域并按曲线编码，LUT 在 Log 空间作用，再解回线性
     vec3 gamut = applyGamutMatrix(color, u_logMatrixId);
     vec3 logColor = encodeLogRgb(gamut, u_logCurveId);

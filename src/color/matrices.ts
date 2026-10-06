@@ -1,4 +1,4 @@
-import type { Rgb } from '../renderer/adjustments-math';
+import type { Rgb } from '../utils/math';
 
 /**
  * 3×3 矩阵的小工具，色彩空间转换的公共底座。
@@ -20,9 +20,6 @@ export type Mat3 = readonly [
   number,
 ];
 
-/** 单位矩阵 */
-export const IDENTITY_MATRIX: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-
 /**
  * ProPhoto RGB (D50) 线性 → sRGB (D65) 线性，含 Bradford 色适应。
  *
@@ -35,8 +32,8 @@ export const PROPHOTO_TO_SRGB: Mat3 = [
   -0.002913765774, -0.008562683515, -0.153263786185, 1.1618264697,
 ];
 
-/** 矩阵是否可逆（行列式不为 0） */
-export function determinant3(m: Mat3): number {
+/** 行列式，只服务于 invertMatrix3 的奇异性判断 */
+function determinant3(m: Mat3): number {
   return (
     m[0] * (m[4] * m[8] - m[5] * m[7]) -
     m[1] * (m[3] * m[8] - m[5] * m[6]) +
@@ -63,20 +60,6 @@ export function invertMatrix3(m: Mat3): Mat3 {
     (b * g - a * h) / det,
     (a * e - b * d) / det,
   ];
-}
-
-/** 矩阵相乘：先套 right，再套 left */
-export function multiplyMatrix3(left: Mat3, right: Mat3): Mat3 {
-  const out = new Array<number>(9);
-  for (let row = 0; row < 3; row++) {
-    for (let column = 0; column < 3; column++) {
-      out[row * 3 + column] =
-        left[row * 3] * right[column] +
-        left[row * 3 + 1] * right[3 + column] +
-        left[row * 3 + 2] * right[6 + column];
-    }
-  }
-  return out as unknown as Mat3;
 }
 
 /** 对 RGB 三元组应用矩阵，不做夹紧（超色域的值是有意义的，交给调用方决定） */

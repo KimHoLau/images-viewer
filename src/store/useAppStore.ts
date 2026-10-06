@@ -127,8 +127,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setCustomLut: (entry) => set({ customLut: entry, lutPresetId: null }),
 
-  // 只认表里有的 id：UI 传回来的字符串不可信，脏值会让着色器下标越界
-  setLogSpace: (id) => set({ logSpaceId: findLogSpace(id ?? '')?.id ?? null }),
+  // 只认表里有的 id：UI 传回来的字符串不可信，脏值会让着色器下标越界。
+  // 关掉（null）与「不认识」都落到 null，所以分开判断，不拿空串当哨兵。
+  setLogSpace: (id) =>
+    set({ logSpaceId: (id === null ? undefined : findLogSpace(id))?.id ?? null }),
 
   setStatus: (status) => set({ status }),
 

@@ -1,7 +1,7 @@
-import type { Rgb } from '../renderer/adjustments-math';
-import { decodeLog, encodeLog } from './log-curves';
-import { LOG_GAMUT_MATRICES, LOG_SPACES, type LogSpace, type LogSpaceId } from './log-spaces';
+import { LOG_CURVES } from './log-curves';
+import { LOG_GAMUT_MATRICES } from './log-spaces';
 import { applyMatrix3, invertMatrix3, type Mat3 } from './matrices';
+import type { Rgb } from '../utils/math';
 
 /**
  * Log 空间的「下标视角」：GLSL 那边拿到的是 int 下标（uniform 不能传字符串），
@@ -37,27 +37,14 @@ export const LOG_GAMUT_INVERSE: readonly Mat3[] = LOG_GAMUT_FORWARD.map((matrix)
   invertMatrix3(matrix),
 );
 
-/** 下标 → Log 空间；越界或非整数返回 null */
-export function logSpaceAt(index: number): LogSpace | null {
-  if (!Number.isInteger(index) || index < 0 || index >= LOG_SPACES.length) return null;
-  return LOG_SPACES[index];
-}
-
-/** 下标 → Log 空间 id；越界返回 null */
-export function logCurveIdAt(index: number): LogSpaceId | null {
-  return logSpaceAt(index)?.id ?? null;
-}
-
-/** 下标形式的 Log 编码；越界原样返回 */
+/** 下标形式的 Log 编码；越界原样返回，与 GLSL 的 encodeLogCurve 兜底一致 */
 export function encodeLogAt(linear: number, index: number): number {
-  const id = logCurveIdAt(index);
-  return id === null ? linear : encodeLog(linear, id);
+  return LOG_CURVES[index]?.encode(linear) ?? linear;
 }
 
 /** 下标形式的 Log 解码；越界原样返回 */
 export function decodeLogAt(encoded: number, index: number): number {
-  const id = logCurveIdAt(index);
-  return id === null ? encoded : decodeLog(encoded, id);
+  return LOG_CURVES[index]?.decode(encoded) ?? encoded;
 }
 
 /** 下标形式的 ProPhoto → Log 色域；越界当单位矩阵 */

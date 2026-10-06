@@ -18,7 +18,7 @@
  * `x >= 0` 时结果和 colour-science 一致；负数的具体行为见各函数注释与测试。
  */
 
-import type { LogSpaceId } from './log-spaces';
+import { LOG_SPACES, type LogSpaceId } from './log-spaces';
 
 /** log10(2)，`log2(x) * LOG10_OF_2` 等价于 colour-science 的 `log10(x)`（GLSL 无 log10） */
 export const LOG10_OF_2 = 0.3010299956639812;
@@ -278,8 +278,10 @@ export const S_LOG3_LOG_OFFSET = 420;
 export const S_LOG3_LOG_SCALE = 261.5;
 export const S_LOG3_MID_GRAY = 0.18;
 export const S_LOG3_BLACK_OFFSET = 0.01;
-export const S_LOG3_LINEAR_SLOPE = (171.2102946929 - 95) / 0.01125;
 export const S_LOG3_LINEAR_OFFSET = 95;
+/** 暗部线性段的分母 `171.2102946929 - 95`；`S_LOG3_LINEAR_SLOPE` 就是分子除以它 */
+export const S_LOG3_LINEAR_DENOM = 171.2102946929 - S_LOG3_LINEAR_OFFSET;
+export const S_LOG3_LINEAR_SLOPE = S_LOG3_LINEAR_DENOM / S_LOG3_CUT;
 
 /** 线性值 → 索尼 S-Log3 编码值（`log_encoding_SLog3`） */
 export function encodeSLog3(linear: number): number {
@@ -298,8 +300,7 @@ export function decodeSLog3(encoded: number): number {
     ? Math.pow(10, (encoded * S_LOG3_CODE_MAX - S_LOG3_LOG_OFFSET) / S_LOG3_LOG_SCALE) *
         (S_LOG3_MID_GRAY + S_LOG3_BLACK_OFFSET) -
         S_LOG3_BLACK_OFFSET
-    : ((encoded * S_LOG3_CODE_MAX - S_LOG3_LINEAR_OFFSET) * S_LOG3_CUT) /
-        (171.2102946929 - S_LOG3_LINEAR_OFFSET);
+    : ((encoded * S_LOG3_CODE_MAX - S_LOG3_LINEAR_OFFSET) * S_LOG3_CUT) / S_LOG3_LINEAR_DENOM;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,79 +436,73 @@ export function decodeDLog(encoded: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// 分发：switch 覆盖全部 14 个 id，default 用 never 兜住漏写
+// 曲线注册表：14 个 id 各有一对编码/解码实现
 // ---------------------------------------------------------------------------
+
+/** 一条 Log 曲线的编码/解码实现 */
+export interface LogCurve {
+  id: LogSpaceId;
+  /** 线性值 → Log 编码值 */
+  encode: (linear: number) => number;
+  /** Log 编码值 → 线性值 */
+  decode: (encoded: number) => number;
+}
+
+/**
+ * id → 实现。
+ *
+ * 用 `Record<LogSpaceId, …>` 而不是 switch：漏一个 id 编译期就报错，和 `never`
+ * 兜底等价，但下游可以按表取用——`LOG_CURVES` 与 GLSL 的下标分发都建在它上面。
+ */
+const CURVE_IMPLEMENTATIONS: Record<LogSpaceId, Omit<LogCurve, 'id'>> = {
+  'f-log': { encode: encodeFLog, decode: decodeFLog },
+  'f-log2': { encode: encodeFLog2, decode: decodeFLog2 },
+  // F-Log2C 与 F-Log2 是同一个传输函数，只有色域不同（colour-science 的
+  // RGB_COLOURSPACE_F_GAMUT_C 也直接复用 log_encoding_FLog2）
+  'f-log2c': { encode: encodeFLog2, decode: decodeFLog2 },
+  'v-log': { encode: encodeVLog, decode: decodeVLog },
+  'n-log': { encode: encodeNLog, decode: decodeNLog },
+  'l-log': { encode: encodeLLog, decode: decodeLLog },
+  'canon-log-2': { encode: encodeCanonLog2, decode: decodeCanonLog2 },
+  'canon-log-3': { encode: encodeCanonLog3, decode: decodeCanonLog3 },
+  's-log3': { encode: encodeSLog3, decode: decodeSLog3 },
+  // S-Log3.Cine 同理，与 S-Log3 只差色域
+  's-log3-cine': { encode: encodeSLog3, decode: decodeSLog3 },
+  'arri-logc3': { encode: encodeArriLogC3, decode: decodeArriLogC3 },
+  'arri-logc4': { encode: encodeArriLogC4, decode: decodeArriLogC4 },
+  log3g10: { encode: encodeLog3G10, decode: decodeLog3G10 },
+  'd-log': { encode: encodeDLog, decode: decodeDLog },
+};
+
+/**
+ * 14 条曲线，顺序与 `LOG_SPACES` 对齐——下标就是 WebGL uniform 的取值。
+ * 渲染器按下标取用，UI 与测试按 id 取用。
+ */
+export const LOG_CURVES: readonly LogCurve[] = LOG_SPACES.map((space) => ({
+  id: space.id,
+  ...CURVE_IMPLEMENTATIONS[space.id],
+}));
+
+/**
+ * 取实现；id 不在表里时抛错。
+ *
+ * 类型上 `Record<LogSpaceId, …>` 已经保证查得到，但这个判断是给 JS 边界的：
+ * store 里的 id 来自 UI，脏值必须在进数学之前被拦住，而不是变成 `undefined.encode`。
+ */
+function implementationFor(spaceId: LogSpaceId): Omit<LogCurve, 'id'> {
+  const implementation: Omit<LogCurve, 'id'> | undefined = CURVE_IMPLEMENTATIONS[spaceId];
+  if (!implementation) {
+    throw new Error(`未知的 Log 空间: ${String(spaceId)}`);
+  }
+  return implementation;
+}
 
 /** 线性值 → Log 编码值 */
 export function encodeLog(linear: number, spaceId: LogSpaceId): number {
-  switch (spaceId) {
-    case 'f-log':
-      return encodeFLog(linear);
-    case 'f-log2':
-    case 'f-log2c':
-      // F-Log2C 与 F-Log2 是同一个传输函数，只有色域不同（colour-science 的
-      // RGB_COLOURSPACE_F_GAMUT_C 也直接复用 log_encoding_FLog2）
-      return encodeFLog2(linear);
-    case 'v-log':
-      return encodeVLog(linear);
-    case 'n-log':
-      return encodeNLog(linear);
-    case 'l-log':
-      return encodeLLog(linear);
-    case 'canon-log-2':
-      return encodeCanonLog2(linear);
-    case 'canon-log-3':
-      return encodeCanonLog3(linear);
-    case 's-log3':
-    case 's-log3-cine':
-      return encodeSLog3(linear);
-    case 'arri-logc3':
-      return encodeArriLogC3(linear);
-    case 'arri-logc4':
-      return encodeArriLogC4(linear);
-    case 'log3g10':
-      return encodeLog3G10(linear);
-    case 'd-log':
-      return encodeDLog(linear);
-    default: {
-      const exhaustive: never = spaceId;
-      throw new Error(`未知的 Log 空间: ${String(exhaustive)}`);
-    }
-  }
+  return implementationFor(spaceId).encode(linear);
 }
 
 /** Log 编码值 → 线性值 */
 export function decodeLog(encoded: number, spaceId: LogSpaceId): number {
-  switch (spaceId) {
-    case 'f-log':
-      return decodeFLog(encoded);
-    case 'f-log2':
-    case 'f-log2c':
-      return decodeFLog2(encoded);
-    case 'v-log':
-      return decodeVLog(encoded);
-    case 'n-log':
-      return decodeNLog(encoded);
-    case 'l-log':
-      return decodeLLog(encoded);
-    case 'canon-log-2':
-      return decodeCanonLog2(encoded);
-    case 'canon-log-3':
-      return decodeCanonLog3(encoded);
-    case 's-log3':
-    case 's-log3-cine':
-      return decodeSLog3(encoded);
-    case 'arri-logc3':
-      return decodeArriLogC3(encoded);
-    case 'arri-logc4':
-      return decodeArriLogC4(encoded);
-    case 'log3g10':
-      return decodeLog3G10(encoded);
-    case 'd-log':
-      return decodeDLog(encoded);
-    default: {
-      const exhaustive: never = spaceId;
-      throw new Error(`未知的 Log 空间: ${String(exhaustive)}`);
-    }
-  }
+  return implementationFor(spaceId).decode(encoded);
 }

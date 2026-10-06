@@ -18,9 +18,9 @@ import { LOG_SPACES, logSpaceIndex } from '../color/log-spaces';
 import { ImageRenderer } from '../renderer/ImageRenderer';
 import { applyAdjustments, type Rgb } from '../renderer/adjustments-math';
 import { generateLut3D } from '../lut/generate';
-import { getPresetLut } from '../lut/presets';
+import { getPresetLut, LUT_PRESETS } from '../lut/presets';
 import { encodeImageData } from '../services/export';
-import { ImageLoader } from '../services/image-loader';
+import { ImageLoader, releaseLoadedImage } from '../services/image-loader';
 import { DEFAULT_ADJUSTMENTS, type ImageAdjustments } from '../types/adjustments';
 
 const lines: string[] = [];
@@ -347,11 +347,11 @@ function checkLogMode(renderer: ImageRenderer): void {
     );
   });
 
-  // 与各种 LUT 预设组合：黑白 + 冷暖各挑一个，覆盖不同形态的 3D LUT
+  // 与全部 7 个 LUT 预设组合：预设形态各不相同，逐个过一遍才算「与各种 LUT 组合」
   const slog3 = logSpaceIndex('s-log3');
   reportGlError(renderer, 'Log 模式的 uniform 上传没有 GL 错误');
-  for (const presetId of ['mono', 'cool-cinema', 'warm-film'] as const) {
-    const lut = getPresetLut(presetId)!;
+  for (const preset of LUT_PRESETS) {
+    const lut = getPresetLut(preset.id)!;
     renderer.setLogMode(true, slog3, slog3);
     renderer.setLut(lut);
     const gpu = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
@@ -361,11 +361,47 @@ function checkLogMode(renderer: ImageRenderer): void {
       worst = Math.max(worst, maxChannelDiff(pixelAt(gpu, at), expected));
     });
     report(
-      `Log 模式 + LUT 预设 GPU 与 CPU 一致（${presetId}）`,
-      worst <= 5 / 255,
+      `Log 模式 + LUT 预设 GPU 与 CPU 一致（${preset.name}）`,
+      worst <= 6 / 255,
       `最大偏差 ${(worst * 255).toFixed(1)}/255`,
     );
   }
+
+  // 屏幕读回的像素与离屏导出的像素必须一致（票 #20/#21 的验收标准）。
+  // 导出走的就是渲染器的 render()，所以只要 Log 设置是渲染器状态的一部分，
+  // 这一步就该是 0；用真实 GPU 跑一遍是为了确认没有哪条路径偷偷复位了它。
+  renderer.setLogMode(true, slog3, slog3);
+  renderer.setLut(getPresetLut('cool-cinema')!);
+  renderer.setAdjustments({ ...DEFAULT_ADJUSTMENTS, exposure: 0.3 });
+  renderer.render();
+  const onScreen = new Uint8ClampedArray(W * H * 4);
+  renderer.context.readPixels(
+    0,
+    0,
+    W,
+    H,
+    renderer.context.RGBA,
+    renderer.context.UNSIGNED_BYTE,
+    onScreen,
+  );
+  const exported = renderer.renderToImageData(W, H);
+  let worstExport = 0;
+  for (let index = 0; index < W; index++) {
+    worstExport = Math.max(
+      worstExport,
+      maxChannelDiff(pixelAt(onScreen, index), imageDataPixel(exported, index)),
+    );
+  }
+  report(
+    'Log 模式下屏幕显示与导出结果一致',
+    worstExport <= 2 / 255,
+    `最大偏差 ${(worstExport * 255).toFixed(1)}/255`,
+  );
+  report(
+    '导出（离屏渲染）不改动屏幕上的 Log 设置',
+    renderer.getLogMode().enabled && renderer.getLogMode().curveId === slog3,
+    `enabled=${renderer.getLogMode().enabled} curveId=${renderer.getLogMode().curveId}`,
+  );
 
   // 强度 0 时 Log 模式应当等于不套 LUT
   renderer.setLut(getPresetLut('mono')!);
@@ -577,7 +613,7 @@ async function checkImageLoading(renderer: ImageRenderer): Promise<void> {
     renderer.setLut(null);
     renderer.setAdjustments({ ...DEFAULT_ADJUSTMENTS });
     renderer.setViewport(width, height);
-    if (!loaded.bitmap) throw new Error('常规图片应当解出 ImageBitmap');
+    if (loaded.source !== 'bitmap') throw new Error('常规图片应当解出 ImageBitmap');
     renderer.setImage(loaded.bitmap, loaded.width, loaded.height);
 
     const rendered = renderer.renderToImageData(width, height);
@@ -588,7 +624,7 @@ async function checkImageLoading(renderer: ImageRenderer): Promise<void> {
       `左上角 ${corner.map((c) => c.toFixed(2)).join(',')}`,
     );
 
-    loaded.bitmap.close();
+    releaseLoadedImage(loaded);
   } catch (error) {
     report('ImageLoader 能解码真实图片文件', false, (error as Error).message);
   } finally {

@@ -43,9 +43,10 @@ import {
   F_LOG_F,
   LOG_C3_CUT_ENCODED,
   LOG_C4_T,
+  LOG_CURVES,
   S_LOG3_CUT_ENCODED,
 } from './log-curves';
-import { LOG_SPACES, type LogSpaceId } from './log-spaces';
+import { LOG_SPACES, logSpaceIndex, type LogSpaceId } from './log-spaces';
 
 /** 一共 14 条曲线，id 列表直接取自数据表，避免测试里再抄一遍 */
 const ALL_IDS: readonly LogSpaceId[] = LOG_SPACES.map((space) => space.id);
@@ -461,5 +462,39 @@ describe('边界值行为', () => {
       expect(Number.isNaN(decode(Number.POSITIVE_INFINITY)), `${id} dec(+∞)`).toBe(false);
       expect(Number.isNaN(decode(Number.NEGATIVE_INFINITY)), `${id} dec(-∞)`).toBe(false);
     }
+  });
+});
+
+describe('LOG_CURVES 注册表', () => {
+  it('顺序与 LOG_SPACES 对齐——下标就是 WebGL uniform 的取值', () => {
+    expect(LOG_CURVES).toHaveLength(LOG_SPACES.length);
+    LOG_CURVES.forEach((curve, index) => {
+      expect(curve.id).toBe(LOG_SPACES[index].id);
+    });
+  });
+
+  it('每条表项与同名的具名实现一致', () => {
+    for (const { id } of CURVE_PAIRS) {
+      const curve = LOG_CURVES[logSpaceIndex(id)];
+      for (const x of [0, 0.18, 1]) {
+        expect(curve.encode(x), `${id} encode(${x})`).toBe(encodeLog(x, id));
+        expect(curve.decode(x), `${id} decode(${x})`).toBe(decodeLog(x, id));
+      }
+    }
+  });
+
+  it('共享曲线的两个空间指向同一个实现', () => {
+    // F-Log2C 与 F-Log2、S-Log3.Cine 与 S-Log3 只差色域，曲线是同一个
+    expect(LOG_CURVES[logSpaceIndex('f-log2c')].encode).toBe(
+      LOG_CURVES[logSpaceIndex('f-log2')].encode,
+    );
+    expect(LOG_CURVES[logSpaceIndex('s-log3-cine')].decode).toBe(
+      LOG_CURVES[logSpaceIndex('s-log3')].decode,
+    );
+  });
+
+  it('表里没有的 id 抛错，而不是返回 undefined 的调用结果', () => {
+    expect(() => encodeLog(0.18, 'not-a-space' as LogSpaceId)).toThrow(/未知的 Log 空间/);
+    expect(() => decodeLog(0.5, 'not-a-space' as LogSpaceId)).toThrow(/未知的 Log 空间/);
   });
 });

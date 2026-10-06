@@ -7,7 +7,7 @@ import {
 } from '../color/log-index';
 import { PROPHOTO_TO_SRGB, applyMatrix3 } from '../color/matrices';
 import type { ImageAdjustments } from '../types/adjustments';
-import { clamp01, smoothstep } from '../utils/math';
+import { clamp01, smoothstep, type Rgb } from '../utils/math';
 
 /**
  * 调整运算的 CPU 实现，与 renderer/shaders.ts 里的 GLSL 逐行对应。
@@ -20,7 +20,8 @@ import { clamp01, smoothstep } from '../utils/math';
  * shaders.test.ts 会检查两者的参数名与步骤顺序是否还对得上。
  */
 
-export type Rgb = readonly [number, number, number];
+/** 三分量颜色值；真正的定义在 utils/math.ts，这里转出去给既有的引用点 */
+export type { Rgb };
 
 /** 线性空间的中灰，对比度的支点 */
 export const MID_GRAY = 0.18;
@@ -121,9 +122,9 @@ function clampRgb(rgb: Rgb): Rgb {
   return [clamp01(rgb[0]), clamp01(rgb[1]), clamp01(rgb[2])];
 }
 
-/** 逐通道取 max，对应 GLSL 的 `max(texel, 0.0)` */
-function floorRgb(rgb: Rgb, floor: number): Rgb {
-  return [Math.max(rgb[0], floor), Math.max(rgb[1], floor), Math.max(rgb[2], floor)];
+/** 逐通道抬到不低于 min，对应 GLSL 的 `max(texel, min)`；不是取整 */
+function clampMinRgb(rgb: Rgb, min: number): Rgb {
+  return [Math.max(rgb[0], min), Math.max(rgb[1], min), Math.max(rgb[2], min)];
 }
 
 /**
@@ -240,7 +241,7 @@ export function applyAdjustments(
   const { inputLinear = false, logMode = false, logCurveId = -1, logMatrixId = -1 } = options;
 
   // 与 GLSL 一致：sRGB 输入先夹到 [0,1] 再转线性，ProPhoto linear 只夹负值
-  let color: Rgb = inputLinear ? floorRgb(srgb, 0) : srgbToLinearRgb(clampRgb(srgb));
+  let color: Rgb = inputLinear ? clampMinRgb(srgb, 0) : srgbToLinearRgb(clampRgb(srgb));
 
   color = applyWhiteBalance(color, adjustments.temperature, adjustments.tint);
   color = applyExposure(color, adjustments.exposure);
@@ -274,7 +275,7 @@ function applyLogPipeline(
 ): Rgb {
   const gamut = applyGamutAt(color, logMatrixId);
   // Log 曲线没有负半轴；抬到 LOG_INPUT_FLOOR 与 Raw-Alchemy 的 np.maximum(img, 1e-6) 一致
-  const encoded = floorRgb(gamut, LOG_INPUT_FLOOR);
+  const encoded = clampMinRgb(gamut, LOG_INPUT_FLOOR);
   const logColor: Rgb = [
     encodeLogAt(encoded[0], logCurveId),
     encodeLogAt(encoded[1], logCurveId),

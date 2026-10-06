@@ -11,15 +11,15 @@ const initialState = useAppStore.getState();
 function makeImage(
   overrides: Partial<LoadedImage> & { metadata?: RawMetadata | null } = {},
 ): LoadedImage {
-  const { metadata = null, linear = null, ...rest } = overrides;
+  const { metadata = null, ...rest } = overrides;
   return {
+    source: 'bitmap',
     bitmap: { close: vi.fn() } as unknown as ImageBitmap,
-    linear,
     width: 6000,
     height: 4000,
     metadata,
     ...rest,
-  };
+  } as LoadedImage;
 }
 
 describe('RightPanel', () => {

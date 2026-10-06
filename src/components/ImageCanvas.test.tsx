@@ -2,6 +2,7 @@ import { act, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LOG_SPACES, logSpaceIndex } from '../color/log-spaces';
 import { PRESET_LUT_SIZE } from '../lut/types';
+import type { LoadedImage } from '../services/image-loader';
 import { DEFAULT_ADJUSTMENTS } from '../types/adjustments';
 import { useAppStore } from '../store/useAppStore';
 import { useViewerStore } from '../store/useViewerStore';
@@ -144,12 +145,12 @@ describe('ImageCanvas', () => {
 
   it('uploads the image texture with its real dimensions', () => {
     const image = {
+      source: 'bitmap',
       bitmap: { close: vi.fn() } as unknown as ImageBitmap,
-      linear: null,
       width: 4000,
       height: 3000,
       metadata: null,
-    };
+    } as const;
 
     render(<ImageCanvas image={image} />);
 
@@ -163,9 +164,9 @@ describe('ImageCanvas', () => {
 
   describe('Log 色彩空间模式', () => {
     /** Log 模式的 RAW 输入：ProPhoto linear 浮点，没有位图 */
-    function linearImage(width = 4, height = 2) {
+    function linearImage(width = 4, height = 2): LoadedImage {
       return {
-        bitmap: null,
+        source: 'linear',
         linear: { data: new Float32Array(width * height * 3), width, height },
         width,
         height,
@@ -173,10 +174,10 @@ describe('ImageCanvas', () => {
       };
     }
 
-    function bitmapImage() {
+    function bitmapImage(): LoadedImage {
       return {
+        source: 'bitmap',
         bitmap: { close: vi.fn() } as unknown as ImageBitmap,
-        linear: null,
         width: 100,
         height: 100,
         metadata: null,
@@ -340,8 +341,8 @@ describe('ImageCanvas', () => {
       const view = render(
         <ImageCanvas
           image={{
+            source: 'bitmap',
             bitmap: { close: vi.fn() } as unknown as ImageBitmap,
-            linear: null,
             width: 4000,
             height: 3000,
             metadata: null,

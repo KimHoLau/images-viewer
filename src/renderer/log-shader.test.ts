@@ -84,6 +84,7 @@ import {
   S_LOG3_CODE_MAX,
   S_LOG3_CUT,
   S_LOG3_CUT_ENCODED,
+  S_LOG3_LINEAR_DENOM,
   S_LOG3_LINEAR_OFFSET,
   S_LOG3_LINEAR_SLOPE,
   S_LOG3_LOG_OFFSET,
@@ -217,13 +218,7 @@ const CURVE_CONSTANTS: ReadonlyArray<readonly [string, readonly number[]]> = [
 const STRUCTURAL_LITERALS = [0, 1, 2, 3, 10];
 
 /** log-shader.ts 里现算的派生量，同样必须与 CPU 侧对得上 */
-const DERIVED_LITERALS = [
-  LOG10_OF_2,
-  LN_2,
-  LOG_INPUT_FLOOR,
-  // S-Log3 解码暗部线性段的分母
-  171.2102946929 - 95,
-];
+const DERIVED_LITERALS = [LOG10_OF_2, LN_2, LOG_INPUT_FLOOR, S_LOG3_LINEAR_DENOM];
 
 /** 取出某个 GLSL 函数的函数体 */
 function functionBody(source: string, signature: string): string {

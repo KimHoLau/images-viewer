@@ -5,10 +5,10 @@
  * （uniform 只认下标），UI 与测试这边用的是可读的 id，这一层就是两者的接缝。
  */
 
-import type { Rgb } from '../renderer/adjustments-math';
 import { LOG_GAMUT_FORWARD } from './log-index';
 import { logSpaceIndex, type LogSpaceId } from './log-spaces';
 import { applyMatrix3, type Mat3 } from './matrices';
+import type { Rgb } from '../utils/math';
 
 /**
  * 取某个 Log 空间的 3×3 矩阵（行主序，长度 9）。

@@ -30,6 +30,14 @@ export interface CurrentImageState {
 export function useCurrentImage(): CurrentImageState {
   const current = useAppStore(selectCurrentImage);
   const logSpaceId = useAppStore((state) => state.logSpaceId);
+  /**
+   * 这次要不要按 ProPhoto linear 解码。
+   *
+   * 依赖它、而不是直接依赖 `logSpaceId`：Log 编码要的是线性光与足够的动态范围，
+   * 8 位 sRGB 位图两条都不满足，所以只要「是 RAW 且开了 Log」就得换解码路径。
+   * 从 S-Log3 换到 V-Log 时这个布尔值不变，24MP 的 RAW 不该为此重解一遍。
+   */
+  const wantsLinear = current?.isRaw === true && logSpaceId !== null;
   const [state, setState] = useState<CurrentImageState>({
     image: null,
     loading: false,
@@ -58,10 +66,6 @@ export function useCurrentImage(): CurrentImageState {
     let cancelled = false;
     setState({ image: null, loading: true, error: null });
 
-    // Log 模式必须重新解码：Log 编码要的是线性光与足够的动态范围，
-    // 8 位 sRGB 位图两条都不满足，所以这时候向 Worker 要 ProPhoto linear 浮点。
-    const wantsLinear = current.isRaw && logSpaceId !== null;
-
     void getLoader()
       .load(current, {
         preview: true,
@@ -83,7 +87,7 @@ export function useCurrentImage(): CurrentImageState {
     return () => {
       cancelled = true;
     };
-  }, [current, logSpaceId]);
+  }, [current, wantsLinear]);
 
   return state;
 }

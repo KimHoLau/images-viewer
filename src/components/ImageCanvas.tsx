@@ -154,9 +154,9 @@ export function ImageCanvas({ image, loading = false }: ImageCanvasProps) {
     const renderer = rendererRef.current;
     if (!renderer) return;
 
-    if (image?.linear) {
+    if (image?.source === 'linear') {
       renderer.setLinearImage(image.linear.data, image.linear.width, image.linear.height);
-    } else if (image?.bitmap) {
+    } else if (image?.source === 'bitmap') {
       renderer.setImage(image.bitmap, image.width, image.height);
     }
 

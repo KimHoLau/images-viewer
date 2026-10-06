@@ -149,7 +149,7 @@ describe('输入像素空间', () => {
       'u_inputLinear > 0.5 ? max(texel, 0.0) : srgbToLinear(clamp(texel, 0.0, 1.0))',
     );
     expect(mathSource).toContain(
-      'inputLinear ? floorRgb(srgb, 0) : srgbToLinearRgb(clampRgb(srgb))',
+      'inputLinear ? clampMinRgb(srgb, 0) : srgbToLinearRgb(clampRgb(srgb))',
     );
   });
 });
@@ -163,12 +163,18 @@ describe('Log 模式的接入', () => {
 
   it('Log 分支在饱和度之后、显示转换之前', () => {
     const saturation = FRAGMENT_SHADER_SOURCE.indexOf('1.0 + u_saturation');
-    const branch = FRAGMENT_SHADER_SOURCE.indexOf('if (u_logMode > 0.5)');
+    const branch = FRAGMENT_SHADER_SOURCE.indexOf('if (u_logMode == 1)');
     const display = FRAGMENT_SHADER_SOURCE.indexOf('display = linearToSrgb(clamp(color');
 
     expect(saturation).toBeGreaterThan(-1);
     expect(branch).toBeGreaterThan(saturation);
     expect(display).toBeGreaterThan(branch);
+  });
+
+  it('开关声明成 int，避免 float/int 的 uniform 类型错配', () => {
+    // 声明成 int 就必须配 uniform1i；两边不一致时 WebGL 只置位错误标志、不抛异常
+    expect(FRAGMENT_SHADER_SOURCE).toContain('uniform int u_logMode;');
+    expect(mathSource).toContain('if (logMode) {');
   });
 
   it('按 色域 → 编码 → LUT → 解码 → 逆矩阵 的顺序走 Log 管线', () => {
@@ -195,7 +201,7 @@ describe('Log 模式的接入', () => {
   it('CPU 镜像走同样的顺序', () => {
     const markers = [
       'applyGamutAt(color, logMatrixId)',
-      'floorRgb(gamut, LOG_INPUT_FLOOR)',
+      'clampMinRgb(gamut, LOG_INPUT_FLOOR)',
       'encodeLogAt(',
       'applyLut(logColor, lut, adjustments.lutStrength)',
       'decodeLogAt(',

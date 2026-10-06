@@ -12,21 +12,20 @@ export interface LinearImageData {
 /**
  * 载入完成的图片。
  *
- * bitmap 与 linear 二选一：常规图片走浏览器解码出的位图，需要 Log 色彩空间转换的
- * RAW 走 16 位 ProPhoto linear 浮点数据——8 位 sRGB 位图既不是线性的，动态范围也不够。
+ * 像素来源只有一种，所以用判别联合而不是两个可空字段：位图走浏览器解码
+ * （常规图片，或 Log 关闭时的 RAW），浮点走 LibRaw 的 16 位 ProPhoto linear
+ * （Log 打开的 RAW）——8 位 sRGB 位图既不是线性的，动态范围也不够。
  */
-export interface LoadedImage {
-  bitmap: ImageBitmap | null;
-  linear: LinearImageData | null;
+export type LoadedImage = {
   width: number;
   height: number;
   /** 仅 RAW 文件有拍摄信息 */
   metadata: RawMetadata | null;
-}
+} & ({ source: 'bitmap'; bitmap: ImageBitmap } | { source: 'linear'; linear: LinearImageData });
 
 /** 释放图片占用的资源；ImageBitmap 必须显式关闭 */
 export function releaseLoadedImage(image: LoadedImage | null): void {
-  image?.bitmap?.close();
+  if (image?.source === 'bitmap') image.bitmap.close();
 }
 
 export interface ImageLoadOptions {
@@ -66,8 +65,8 @@ export class ImageLoader {
     }
 
     return {
+      source: 'bitmap',
       bitmap,
-      linear: null,
       width: bitmap.width,
       height: bitmap.height,
       metadata: null,
@@ -88,7 +87,7 @@ export class ImageLoader {
 
     if (decoded.format === 'rgb32f-linear') {
       return {
-        bitmap: null,
+        source: 'linear',
         linear: { data: decoded.pixels, width: decoded.width, height: decoded.height },
         width: decoded.width,
         height: decoded.height,
@@ -100,8 +99,8 @@ export class ImageLoader {
     const bitmap = await createImageBitmap(imageData);
 
     return {
+      source: 'bitmap',
       bitmap,
-      linear: null,
       width: decoded.width,
       height: decoded.height,
       metadata: decoded.metadata,

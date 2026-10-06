@@ -83,6 +83,7 @@ import {
   S_LOG3_CODE_MAX,
   S_LOG3_CUT,
   S_LOG3_CUT_ENCODED,
+  S_LOG3_LINEAR_DENOM,
   S_LOG3_LINEAR_OFFSET,
   S_LOG3_LINEAR_SLOPE,
   S_LOG3_LOG_OFFSET,
@@ -124,9 +125,6 @@ function g(value: number): string {
 
 /** 与 Raw-Alchemy 的 `np.maximum(img, 1e-6)` 对齐：Log 曲线没有负半轴 */
 const LOG_FLOOR_LITERAL = g(LOG_INPUT_FLOOR);
-
-/** S-Log3 暗部线性段的分母 `171.2102946929 - 95`，与 log-curves.ts 的解码分支同一来源 */
-const S_LOG3_LINEAR_DENOM = 171.2102946929 - 95;
 
 /** Log 色彩空间曲线的 GLSL：14 组编码/解码函数 + 两个按 id 的分发器 */
 export const LOG_CURVE_SHADER_SOURCE = `
@@ -360,7 +358,7 @@ vec3 applyInverseGamutMatrix(vec3 rgb, int matrixId) {
 
 /** Log 模式在片元着色器里用到的 uniform 声明 */
 export const LOG_UNIFORM_SHADER_SOURCE = `
-uniform float u_logMode;
+uniform int u_logMode;
 uniform int u_logCurveId;
 uniform int u_logMatrixId;
 `;
