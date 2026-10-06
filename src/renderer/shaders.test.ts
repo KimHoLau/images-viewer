@@ -253,8 +253,47 @@ describe('3D LUT 的接入', () => {
 
   it('maps input to texel centers the same way the CPU sampler does', () => {
     // 格点 i 的纹素中心是 (i + 0.5) / size
-    expect(FRAGMENT_SHADER_SOURCE).toContain('+ 0.5) / u_lutSize;');
+    expect(FRAGMENT_SHADER_SOURCE).toContain('+ 0.5) / u_lutSize');
     expect(mathSource).toContain('clamp01(rgb[0]) * (n - 1)');
+    expect(mathSource).toContain('const x0 = Math.min(Math.floor(x), n - 2);');
+  });
+
+  it('interpolates with tetrahedral in both, never with hardware trilinear', () => {
+    // GLSL 侧：必须是手写的四面体（六条分支），并且取格点要用 NEAREST 语义
+    expect(FRAGMENT_SHADER_SOURCE).toContain('vec3 sampleLutTetrahedral(vec3 rgb)');
+    expect(FRAGMENT_SHADER_SOURCE).toContain('floor(coord) + 0.5');
+    for (const branch of [
+      'if (fr >= fg && fg >= fb)',
+      'if (fr >= fb && fb >= fg)',
+      'if (fb >= fr && fr >= fg)',
+      'if (fg >= fr && fr >= fb)',
+      'if (fg >= fb && fb >= fr)',
+    ]) {
+      expect(FRAGMENT_SHADER_SOURCE, `缺少分支 ${branch}`).toContain(branch);
+    }
+    // 不能再出现直接把插值交给硬件的那一行
+    expect(FRAGMENT_SHADER_SOURCE).not.toContain(
+      'texture(u_lut, (clamp(display, 0.0, 1.0) * (u_lutSize - 1.0) + 0.5) / u_lutSize)',
+    );
+
+    // CPU 侧：同一条 if/else 链（条件与 GLSL 的分支逐条对应）
+    expect(mathSource).toContain('if (fx >= fy && fy >= fz) {');
+    expect(mathSource).toContain('} else if (fx >= fz && fz >= fy) {');
+    expect(mathSource).toContain('} else if (fz >= fx && fx >= fy) {');
+    expect(mathSource).toContain('} else if (fy >= fx && fx >= fz) {');
+    expect(mathSource).toContain('} else if (fy >= fz && fz >= fx) {');
+  });
+
+  it('两个开关两条路，GPU 与 CPU 的分支条件逐条对应', () => {
+    // 显示空间输出走 Rec.709 γ2.4 → sRGB；Log 空间输出走解码 → 逆矩阵 → sRGB
+    expect(FRAGMENT_SHADER_SOURCE).toContain('u_lutOutputEncoded > 0.5 || !hasLut');
+    expect(FRAGMENT_SHADER_SOURCE).toContain('vec3 rec709ToLinear(vec3 encoded)');
+    expect(mathSource).toContain('export function rec709ToLinear(channel: number): number');
+    expect(mathSource).toContain('if (!lutOutputEncoded) {');
+    expect(mathSource).toContain('if (!hasLut) {');
+    // 没挂 LUT 时两条路必须等价（开关不生效）
+    expect(FRAGMENT_SHADER_SOURCE).toContain('bool hasLut = u_lutEnabled > 0.5 && u_lutStrength > 0.0;');
+    expect(mathSource).toContain('const hasLut = lut !== null && adjustments.lutStrength > 0;');
   });
 
   it('applies the LUT after converting back to display space in both', () => {

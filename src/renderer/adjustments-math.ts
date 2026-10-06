@@ -146,6 +146,18 @@ export interface LogPipelineOptions {
   logCurveId?: number;
   /** Log 色域矩阵下标；越界表示不做色域转换 */
   logMatrixId?: number;
+  /**
+   * LUT 的输出是否仍在 Log（编码）空间。
+   *
+   * 默认 `false`：LUT 的输出已经是显示空间，直接显示。ARRI 的 `LogC4 → Rec.709`
+   * 这类技术转换就是这种——它是一条完整的 Log→显示转换。判别证据：喂 18% 灰时
+   * 它输出 0.396，而 Rec.709 γ2.4 下 0.396 正是 18% 灰的标准显示值；若把它当
+   * Log 再解码一次，蓝通道会被放大到 2.26 并夹成纯青。
+   *
+   * 置 `true` 则保留旧行为：LUT 输出仍按 Log 解码 → 回工作空间 → 显示，
+   * 用于串联「Log 进、Log 出」的 LUT。
+   */
+  lutOutputEncoded?: boolean;
 }
 
 /** 3D LUT 的最小形状；lut/types.ts 的 Lut3D 兼容 */
@@ -155,10 +167,18 @@ export interface LutSamplerSource {
 }
 
 /**
- * 从 3D LUT 采样，三线性插值。
+ * 从 3D LUT 采样，四面体插值（tetrahedral）。
  *
- * 与 GPU 上 `TEXTURE_MIN_FILTER = LINEAR` 对一个 3D 纹理取样的行为一致：
- * 输入 c 对应格点位置 c * (size - 1)，取相邻 8 个格点按小数部分插值。
+ * 为什么不是三线性：三线性把立方体 8 个角一起加权平均。现实里的 LUT（ARRI 的
+ * LogC4→Rec.709 就是）把中性对角线映射成精确的中性，却把离轴格点推向各自的通道，
+ * 于是「色度为零的输入」会被插出颜色——实测官方那份 33³ LUT 能偏出 4.6/255，
+ * 再被 LogC4 解码放大成 10–22/255，中灰上肉眼可见。四面体只取 4 个角，且按小数
+ * 部分的大小关系选角，沿中性对角线给出精确的中性。
+ *
+ * 与 GPU 上 `TEXTURE_MIN_FILTER = LINEAR` 的三线性不同，所以着色器里也手写了同一套
+ * 四面体（见 renderer/shaders.ts），两边必须逐行对应。
+ *
+ * 输入 c 对应格点位置 c * (size - 1)，取相邻 8 个格点、按小数部分切成 6 个四面体。
  */
 export function sampleLut3D(lut: LutSamplerSource, rgb: Rgb): Rgb {
   const n = lut.size;
@@ -167,16 +187,14 @@ export function sampleLut3D(lut: LutSamplerSource, rgb: Rgb): Rgb {
   const y = clamp01(rgb[1]) * (n - 1);
   const z = clamp01(rgb[2]) * (n - 1);
 
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  const z0 = Math.floor(z);
-  const x1 = Math.min(x0 + 1, n - 1);
-  const y1 = Math.min(y0 + 1, n - 1);
-  const z1 = Math.min(z0 + 1, n - 1);
+  // 上界收到 n - 2：这样 x0 + 1 一定在界内，且落在最后一格时插值退化为该格内的值
+  const x0 = Math.min(Math.floor(x), n - 2);
+  const y0 = Math.min(Math.floor(y), n - 2);
+  const z0 = Math.min(Math.floor(z), n - 2);
 
-  const tx = x - x0;
-  const ty = y - y0;
-  const tz = z - z0;
+  const fx = x - x0;
+  const fy = y - y0;
+  const fz = z - z0;
 
   const at = (r: number, g: number, b: number, channel: number): number =>
     lut.data[((b * n + g) * n + r) * 3 + channel];
@@ -184,23 +202,33 @@ export function sampleLut3D(lut: LutSamplerSource, rgb: Rgb): Rgb {
   const result: number[] = [0, 0, 0];
   for (let channel = 0; channel < 3; channel++) {
     const c000 = at(x0, y0, z0, channel);
-    const c100 = at(x1, y0, z0, channel);
-    const c010 = at(x0, y1, z0, channel);
-    const c110 = at(x1, y1, z0, channel);
-    const c001 = at(x0, y0, z1, channel);
-    const c101 = at(x1, y0, z1, channel);
-    const c011 = at(x0, y1, z1, channel);
-    const c111 = at(x1, y1, z1, channel);
+    const c111 = at(x0 + 1, y0 + 1, z0 + 1, channel);
 
-    const c00 = c000 + (c100 - c000) * tx;
-    const c10 = c010 + (c110 - c010) * tx;
-    const c01 = c001 + (c101 - c001) * tx;
-    const c11 = c011 + (c111 - c011) * tx;
-
-    const c0 = c00 + (c10 - c00) * ty;
-    const c1 = c01 + (c11 - c01) * ty;
-
-    result[channel] = c0 + (c1 - c0) * tz;
+    if (fx >= fy && fy >= fz) {
+      const c100 = at(x0 + 1, y0, z0, channel);
+      const c110 = at(x0 + 1, y0 + 1, z0, channel);
+      result[channel] = c000 + fx * (c100 - c000) + fy * (c110 - c100) + fz * (c111 - c110);
+    } else if (fx >= fz && fz >= fy) {
+      const c100 = at(x0 + 1, y0, z0, channel);
+      const c101 = at(x0 + 1, y0, z0 + 1, channel);
+      result[channel] = c000 + fx * (c100 - c000) + fz * (c101 - c100) + fy * (c111 - c101);
+    } else if (fz >= fx && fx >= fy) {
+      const c001 = at(x0, y0, z0 + 1, channel);
+      const c101 = at(x0 + 1, y0, z0 + 1, channel);
+      result[channel] = c000 + fz * (c001 - c000) + fx * (c101 - c001) + fy * (c111 - c101);
+    } else if (fy >= fx && fx >= fz) {
+      const c010 = at(x0, y0 + 1, z0, channel);
+      const c110 = at(x0 + 1, y0 + 1, z0, channel);
+      result[channel] = c000 + fy * (c010 - c000) + fx * (c110 - c010) + fz * (c111 - c110);
+    } else if (fy >= fz && fz >= fx) {
+      const c010 = at(x0, y0 + 1, z0, channel);
+      const c011 = at(x0, y0 + 1, z0 + 1, channel);
+      result[channel] = c000 + fy * (c010 - c000) + fz * (c011 - c010) + fx * (c111 - c011);
+    } else {
+      const c001 = at(x0, y0, z0 + 1, channel);
+      const c011 = at(x0, y0 + 1, z0 + 1, channel);
+      result[channel] = c000 + fz * (c001 - c000) + fy * (c011 - c001) + fx * (c111 - c011);
+    }
   }
 
   return [result[0], result[1], result[2]];
@@ -238,7 +266,13 @@ export function applyAdjustments(
   lut: LutSamplerSource | null = null,
   options: LogPipelineOptions = {},
 ): Rgb {
-  const { inputLinear = false, logMode = false, logCurveId = -1, logMatrixId = -1 } = options;
+  const {
+    inputLinear = false,
+    logMode = false,
+    logCurveId = -1,
+    logMatrixId = -1,
+    lutOutputEncoded = false,
+  } = options;
 
   // 与 GLSL 一致：sRGB 输入先夹到 [0,1] 再转线性，ProPhoto linear 只夹负值
   let color: Rgb = inputLinear ? clampMinRgb(srgb, 0) : srgbToLinearRgb(clampRgb(srgb));
@@ -250,7 +284,7 @@ export function applyAdjustments(
   color = applySaturation(color, adjustments.saturation);
 
   if (logMode) {
-    return applyLogPipeline(color, adjustments, lut, logCurveId, logMatrixId);
+    return applyLogPipeline(color, adjustments, lut, logCurveId, logMatrixId, lutOutputEncoded);
   }
 
   const display = linearToSrgbRgb(clampRgb(color));
@@ -258,13 +292,31 @@ export function applyAdjustments(
 }
 
 /**
+ * Rec.709 的显示传递函数（γ2.4 那一段）→ 线性。
+ *
+ * ARRI 的 `LogC4 → Rec.709` 输出的是 Rec.709 γ2.4 编码的显示值，而本工程的显示空间是
+ * sRGB。直接把 γ2.4 的值当 sRGB 发出去，亮度会差一档以内——但既然是显式转换，就做对。
+ */
+export function rec709ToLinear(channel: number): number {
+  return channel < 0.081 ? channel / 4.5 : Math.pow((channel + 0.099) / 1.099, 1 / 0.45);
+}
+
+/**
  * Log 模式的后半段，与 GLSL 里 `u_logMode > 0.5` 那一段逐行对应：
  *
- *   线性工作空间 → Log 色域 → Log 编码 → 套 LUT（在 Log 空间）→ Log 解码
- *   → 回线性工作空间 → ProPhoto → sRGB 原色 → 显示
+ *   线性工作空间 → Log 色域 → Log 编码 → 套 LUT（在 Log 空间）→ 显示
  *
- * LUT 夹在编解码之间是关键：视频 LUT 的定义域就是 Log 编码值。
- * 解码后必须换回 sRGB 原色再套 gamma，只做 gamma 的话颜色会明显发灰。
+ * LUT 夹在编码之后是关键：视频 LUT 的定义域就是 Log 编码值。
+ *
+ * 出来的那一步取决于 LUT 的输出在哪个空间：
+ * - `lutOutputEncoded = false`（默认）：LUT 的输出已经是显示空间（ARRI 技术转换就是），
+ *   只需从 Rec.709 γ2.4 转到 sRGB。
+ * - `lutOutputEncoded = true`：LUT 输出仍在 Log 空间，解码 → 回工作空间 → 换回 sRGB 原色 → gamma。
+ *   多一遍解码会把超过 1 的通道夹掉，用错在 ARRI 那种 LUT 上会得到纯青的天空。
+ *
+ * 没挂 LUT（或强度为 0）时这个开关不生效——没有 LUT 就没有「LUT 输出在哪个空间」，
+ * 此时按「输出仍是 Log」那一条走，结果与加这个开关之前逐位一致。
+ * 改动这里时必须同步改 renderer/shaders.ts 的同名分支。
  */
 function applyLogPipeline(
   color: Rgb,
@@ -272,6 +324,7 @@ function applyLogPipeline(
   lut: LutSamplerSource | null,
   logCurveId: number,
   logMatrixId: number,
+  lutOutputEncoded: boolean,
 ): Rgb {
   const gamut = applyGamutAt(color, logMatrixId);
   // Log 曲线没有负半轴；抬到 LOG_INPUT_FLOOR 与 Raw-Alchemy 的 np.maximum(img, 1e-6) 一致
@@ -282,7 +335,25 @@ function applyLogPipeline(
     encodeLogAt(encoded[2], logCurveId),
   ];
 
+  const hasLut = lut !== null && adjustments.lutStrength > 0;
   const graded = applyLut(logColor, lut, adjustments.lutStrength);
+
+  if (!lutOutputEncoded) {
+    if (!hasLut) {
+      // 没挂 LUT 时 LUT 输出空间这个设置无从谈起，走与「输出仍是 Log」相同的那条路：
+      // 「Log 空间里什么都没套」的显示结果不该因为这个开关而变。
+      return applyLogPipeline(color, adjustments, null, logCurveId, logMatrixId, true);
+    }
+
+    // LUT 输出是 Rec.709 γ2.4 编码的显示值 → 线性 → sRGB 编码
+    const rec709Linear: Rgb = [
+      rec709ToLinear(graded[0]),
+      rec709ToLinear(graded[1]),
+      rec709ToLinear(graded[2]),
+    ];
+    return clampRgb(linearToSrgbRgb(clampRgb(rec709Linear)));
+  }
+
   const decoded: Rgb = [
     decodeLogAt(graded[0], logCurveId),
     decodeLogAt(graded[1], logCurveId),

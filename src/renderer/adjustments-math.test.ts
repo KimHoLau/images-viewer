@@ -17,6 +17,7 @@ import {
   linearToSrgb,
   luminance,
   MID_GRAY,
+  rec709ToLinear,
   sampleLut3D,
   srgbToLinear,
   type Rgb,
@@ -190,14 +191,52 @@ describe('sampleLut3D', () => {
     expectRgb(sampleLut3D(lut, [1, 0, 0.5]), [0.5, 1, 0], 6);
   });
 
-  it('weights the eight corners by trilinear interpolation', () => {
-    // 只有 (1,1,1) 这个格点是 1，其余为 0
+  it('weights the four selected corners by tetrahedral interpolation', () => {
+    // 只有 (1,1,1) 这个格点是 1，其余为 0。
+    // 四面体只用 4 个角：立方体中心落在 fz >= fx >= fy 那一支，
+    // 取 (0,0,0)、(0,0,1)、(1,0,1)、(1,1,1)，权重为 1 - fz、fx、fy、fz 的累计，
+    // 于是中心点的结果是 0.5 而不是三线性的 0.125。
     const lut = generateLut3D(2, (rgb) =>
       rgb[0] === 1 && rgb[1] === 1 && rgb[2] === 1 ? [1, 1, 1] : [0, 0, 0],
     );
 
-    // 立方体中心：三线性权重为 0.5³ = 0.125
-    expectRgb(sampleLut3D(lut, [0.5, 0.5, 0.5]), [0.125, 0.125, 0.125], 6);
+    expectRgb(sampleLut3D(lut, [0.5, 0.5, 0.5]), [0.5, 0.5, 0.5], 6);
+  });
+
+  it('keeps a neutral input neutral when off-axis nodes are pushed toward their own colour', () => {
+    // 复现现实里那份官方 ARRI LogC4→Rec.709 LUT 的结构：中性对角线上的格点精确中性，
+    // 离轴格点被推向各自的通道——哪个通道最大就抬它、哪个最小就压它。
+    // 实测这份 33³ LUT 在 t≈0.29 处能让一个色度为零的输入偏出 4.6/255（被 LogC4
+    // 解码放大成 10–22/255）。三线性取 8 个角加权，会把这些离轴方向混进中性输入；
+    // 四面体只取 4 个角，结果精确中性。
+    const lut = generateLut3D(5, (rgb) => {
+      if (rgb[0] === rgb[1] && rgb[1] === rgb[2]) return rgb;
+      const values = [rgb[0], rgb[1], rgb[2]];
+      const dominant = values.indexOf(Math.max(...values));
+      const recessive = values.indexOf(Math.min(...values));
+      return values.map((v, index): number =>
+        index === dominant
+          ? Math.min(1, v + 0.3)
+          : index === recessive
+            ? Math.max(0, v - 0.3)
+            : v,
+      ) as [number, number, number];
+    });
+
+    // 先确认这个 LUT 确实「中性安全」：对角线上的格点必须是原值
+    for (let i = 0; i < lut.size; i++) {
+      const expected = i / (lut.size - 1);
+      const base = ((i * lut.size + i) * lut.size + i) * 3;
+      expect(lut.data[base]).toBeCloseTo(expected, 12);
+      expect(lut.data[base + 1]).toBeCloseTo(expected, 12);
+      expect(lut.data[base + 2]).toBeCloseTo(expected, 12);
+    }
+
+    for (const value of [0.1, 0.29, 0.4, 0.625, 0.75]) {
+      const out = sampleLut3D(lut, [value, value, value]);
+      expect(out[0]).toBe(out[1]);
+      expect(out[1]).toBe(out[2]);
+    }
   });
 
   it('clamps input outside [0, 1]', () => {
@@ -350,6 +389,11 @@ describe('Log 色彩空间模式', () => {
     return { inputLinear: true, logMode: true, logCurveId: index, logMatrixId: index };
   }
 
+  /** 「LUT 输出仍在 Log 空间」那一套选项；只挂 LUT 的用例需要它 */
+  function encodedLutOptions(index: number) {
+    return { ...linearOptions(index), lutOutputEncoded: true };
+  }
+
   it('关闭时与加 Log 支持之前逐位一致', () => {
     const settings = { ...DEFAULT_ADJUSTMENTS, exposure: 0.5, contrast: 0.2 };
     const lut = generateLut3D(9, (rgb) => [rgb[0] * 0.9, rgb[1], rgb[2] + 0.05]);
@@ -424,26 +468,23 @@ describe('Log 色彩空间模式', () => {
   });
 
   it('未知下标原样返回，不会崩', () => {
-    // 下标越界只是「不做色域与曲线转换」，输入仍然按 ProPhoto linear 解释，
-    // 所以显示那一步的 ProPhoto → sRGB 原色转换照做
-    const source: Rgb = [0.5, 0.5, 0.5];
-    const linear = applyMatrix3(PROPHOTO_TO_SRGB, source);
-    const expected: Rgb = [
-      linearToSrgb(clamp01(linear[0])),
-      linearToSrgb(clamp01(linear[1])),
-      linearToSrgb(clamp01(linear[2])),
-    ];
+    // 下标越界 = 不做色域与曲线转换；没挂 LUT 时「输出空间」这个开关不生效，
+    // 所以给不给它都应当得到同一个结果
+    const base = {
+      inputLinear: true,
+      logMode: true,
+      logCurveId: -1,
+      logMatrixId: -1,
+    };
 
-    expectRgb(
-      applyAdjustments(source, DEFAULT_ADJUSTMENTS, null, {
-        inputLinear: true,
-        logMode: true,
-        logCurveId: -1,
-        logMatrixId: -1,
-      }),
-      expected,
-      10,
-    );
+    const result = applyAdjustments([0.5, 0.5, 0.5], DEFAULT_ADJUSTMENTS, null, base);
+    const withEncoded = applyAdjustments([0.5, 0.5, 0.5], DEFAULT_ADJUSTMENTS, null, {
+      ...base,
+      lutOutputEncoded: true,
+    });
+
+    expectRgb(result, withEncoded, 10);
+    for (const channel of result) expect(Number.isFinite(channel)).toBe(true);
   });
 
   describe('LUT 作用在 Log 空间', () => {
@@ -452,7 +493,12 @@ describe('Log 色彩空间模式', () => {
     it('LUT 的输入是 Log 编码值，不是显示值', () => {
       const index = logSpaceIndex('s-log3');
       const source: Rgb = [0.2, 0.5, 0.8];
-      const result = applyAdjustments(source, DEFAULT_ADJUSTMENTS, inverted, linearOptions(index));
+      const result = applyAdjustments(
+        source,
+        DEFAULT_ADJUSTMENTS,
+        inverted,
+        encodedLutOptions(index),
+      );
 
       // 按规格重推一遍：色域 → 编码 → LUT → 解码 → 回 ProPhoto → 显示。
       // 这里故意重写而不是调被测函数，LUT 一旦挪到编码之前这条就会红。
@@ -498,7 +544,7 @@ describe('Log 色彩空间模式', () => {
 
       for (const sample of samples) {
         expectRgb(
-          applyAdjustments(sample, settings, inverted, linearOptions(index)),
+          applyAdjustments(sample, settings, inverted, encodedLutOptions(index)),
           applyAdjustments(sample, DEFAULT_ADJUSTMENTS, null, linearOptions(index)),
           6,
         );
@@ -511,10 +557,115 @@ describe('Log 色彩空间模式', () => {
 
       for (const sample of samples) {
         expectRgb(
-          applyAdjustments(sample, DEFAULT_ADJUSTMENTS, identity, linearOptions(index)),
+          applyAdjustments(sample, DEFAULT_ADJUSTMENTS, identity, encodedLutOptions(index)),
           applyAdjustments(sample, DEFAULT_ADJUSTMENTS, null, linearOptions(index)),
           5,
         );
+      }
+    });
+  });
+
+  describe('LUT 输出已经是显示空间（默认）', () => {
+    const index = logSpaceIndex('arri-logc4');
+
+    /** 只做「色域 → 编码 → LUT」，不做事后解码 */
+    function expectedDisplay(source: Rgb, lut: ReturnType<typeof generateLut3D>): Rgb {
+      const gamut = applyGamutAt(source, index);
+      const encoded: Rgb = [
+        encodeLog(Math.max(gamut[0], 1e-6), 'arri-logc4'),
+        encodeLog(Math.max(gamut[1], 1e-6), 'arri-logc4'),
+        encodeLog(Math.max(gamut[2], 1e-6), 'arri-logc4'),
+      ];
+      const graded = sampleLut3D(lut, encoded);
+      const linear: Rgb = [
+        rec709ToLinear(graded[0]),
+        rec709ToLinear(graded[1]),
+        rec709ToLinear(graded[2]),
+      ];
+      return [
+        linearToSrgb(clamp01(linear[0])),
+        linearToSrgb(clamp01(linear[1])),
+        linearToSrgb(clamp01(linear[2])),
+      ];
+    }
+
+    it('不再把 LUT 的输出当 Log 解码', () => {
+      const lut = generateLut3D(33, (rgb) => [rgb[0] * 1.1, rgb[1] * 0.95, rgb[2] * 0.9]);
+      const source: Rgb = [0.2, 0.5, 0.8];
+
+      const result = applyAdjustments(source, DEFAULT_ADJUSTMENTS, lut, {
+        inputLinear: true,
+        logMode: true,
+        logCurveId: index,
+        logMatrixId: index,
+        // lutOutputEncoded 缺省即 false
+      });
+
+      expectRgb(result, expectedDisplay(source, lut), 6);
+
+      // 与「输出仍是 Log」那一套必须明显不同，否则这次改动等于没做
+      const encodedOutput = applyAdjustments(
+        source,
+        DEFAULT_ADJUSTMENTS,
+        lut,
+        encodedLutOptions(index),
+      );
+      const diff = Math.max(...result.map((v, c) => Math.abs(v - encodedOutput[c])));
+      expect(diff).toBeGreaterThan(0.01);
+    });
+
+    it('挂了 LUT 时不再把输出当 Log 解码（只做 γ2.4 → sRGB）', () => {
+      const source: Rgb = [0.3, 0.4, 0.5];
+      const lut = generateLut3D(2, (rgb) => rgb);
+      const options = {
+        inputLinear: true,
+        logMode: true,
+        logCurveId: index,
+        logMatrixId: index,
+      };
+
+      const withLut = applyAdjustments(source, DEFAULT_ADJUSTMENTS, lut, options);
+
+      // 按规格重推：色域 → LogC4 编码 → 恒等 LUT → Rec.709 γ2.4 → sRGB。
+      // 这里故意重写而不是调被测函数
+      const gamut = applyGamutAt(source, index);
+      const expected: Rgb = [
+        linearToSrgb(clamp01(rec709ToLinear(encodeLog(Math.max(gamut[0], 1e-6), 'arri-logc4')))),
+        linearToSrgb(clamp01(rec709ToLinear(encodeLog(Math.max(gamut[1], 1e-6), 'arri-logc4')))),
+        linearToSrgb(clamp01(rec709ToLinear(encodeLog(Math.max(gamut[2], 1e-6), 'arri-logc4')))),
+      ];
+      expectRgb(withLut, expected, 6);
+
+      // 与「输出仍是 Log」那一套必须明显不同，否则这个开关等于没接
+      const encodedOutput = applyAdjustments(
+        source,
+        DEFAULT_ADJUSTMENTS,
+        lut,
+        encodedLutOptions(index),
+      );
+      const diff = Math.max(...withLut.map((v, c) => Math.abs(v - encodedOutput[c])));
+      expect(diff).toBeGreaterThan(0.05);
+    });
+
+    it('中性输入仍然保持中性（Rec.709 转 sRGB 不会引入偏色）', () => {
+      const lut = generateLut3D(33, (rgb) => {
+        if (rgb[0] === rgb[1] && rgb[1] === rgb[2]) return rgb;
+        const values = [rgb[0], rgb[1], rgb[2]];
+        const dominant = values.indexOf(Math.max(...values));
+        return values.map((v, i): number =>
+          i === dominant ? Math.min(1, v + 0.2) : v,
+        ) as [number, number, number];
+      });
+
+      for (const value of [0.1, 0.18, 0.3, 0.6]) {
+        const out = applyAdjustments([value, value, value], DEFAULT_ADJUSTMENTS, lut, {
+          inputLinear: true,
+          logMode: true,
+          logCurveId: index,
+          logMatrixId: index,
+        });
+        expect(out[0]).toBeCloseTo(out[1], 6);
+        expect(out[1]).toBeCloseTo(out[2], 6);
       }
     });
   });
