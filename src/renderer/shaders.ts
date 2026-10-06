@@ -1,4 +1,5 @@
 import type { ImageAdjustments } from '../types/adjustments';
+import { LOG_SHADER_SOURCE } from './log-shader';
 
 /**
  * 顶点着色器：四边形直接用裁剪空间坐标，纹理坐标透传。
@@ -27,12 +28,23 @@ void main() {
  *
  * LUT 放在线性运算之后：.cube 这类 LUT 是按 gamma 编码后的显示值定义的，
  * 喂线性值会明显偏暗。
+ *
+ * 两种输入空间：
+ *   - u_inputLinear = 0：8 位 sRGB 位图，先套 sRGB 传递函数转线性；
+ *   - u_inputLinear = 1：RAW 的 16 位 ProPhoto linear 浮点texel，本来就是线性的，
+ *     只夹掉负值（Log 编码没有负半轴），不做上夹，好让高光余量进得了 Log。
+ *
+ * Log 模式（u_logMode = 1）在饱和度之后、LUT 之前插入色彩空间转换：
+ *   ProPhoto linear → 目标 Log 色域 → Log 编码 → LUT → Log 解码 → 回 ProPhoto → sRGB 显示
+ * 视频 LUT 是按 Log 编码值定义的，只有把像素送进 Log 空间，LUT 才是它被设计成的那副样子。
+ * 曲线的 GLSL 在 renderer/log-shader.ts，数值直接从 color/log-curves.ts 插值过来。
  */
 export const FRAGMENT_SHADER_SOURCE = `#version 300 es
 precision highp float;
 precision highp sampler3D;
 
 uniform sampler2D u_image;
+uniform float u_inputLinear;
 
 uniform float u_temperature;
 uniform float u_tint;
@@ -81,10 +93,11 @@ vec3 applyLut(vec3 display) {
   vec3 graded = texture(u_lut, coord).rgb;
   return mix(display, graded, u_lutStrength);
 }
-
+${LOG_SHADER_SOURCE}
 void main() {
-  vec3 color = clamp(texture(u_image, v_texCoord).rgb, 0.0, 1.0);
-  color = srgbToLinear(color);
+  vec3 texel = texture(u_image, v_texCoord).rgb;
+  // sRGB 路径保持原来的两步（先夹紧再转线性）；ProPhoto linear 只夹负值
+  vec3 color = u_inputLinear > 0.5 ? max(texel, 0.0) : srgbToLinear(clamp(texel, 0.0, 1.0));
 
   // 1. 白平衡：色温沿蓝-橙轴，色调沿绿-品红轴
   vec3 warmFilter = vec3(
@@ -116,9 +129,23 @@ void main() {
   luma = luminance(color);
   color = mix(vec3(luma), color, 1.0 + u_saturation);
 
-  // 6. 回到显示空间后套 LUT
-  vec3 display = linearToSrgb(clamp(color, 0.0, 1.0));
-  outColor = vec4(clamp(applyLut(display), 0.0, 1.0), 1.0);
+  vec3 display;
+  if (u_logMode > 0.5) {
+    // 6. Log 模式：线性光送进目标 Log 色域并按曲线编码，LUT 在 Log 空间作用，再解回线性
+    vec3 gamut = applyGamutMatrix(color, u_logMatrixId);
+    vec3 logColor = encodeLogRgb(gamut, u_logCurveId);
+    vec3 graded = applyLut(logColor);
+    vec3 decoded = decodeLogRgb(graded, u_logCurveId);
+    vec3 prophoto = applyInverseGamutMatrix(decoded, u_logMatrixId);
+    // 解回 ProPhoto linear 之后还得换到 sRGB 原色，只套 gamma 的话饱和度会明显偏低
+    display = linearToSrgb(clamp(PROPHOTO_TO_SRGB * prophoto, 0.0, 1.0));
+  } else {
+    // 6. 回到显示空间后套 LUT
+    display = linearToSrgb(clamp(color, 0.0, 1.0));
+    display = applyLut(display);
+  }
+
+  outColor = vec4(clamp(display, 0.0, 1.0), 1.0);
 }`;
 
 /** 参数键与 uniform 名的对应关系，两处保持同一条规则 */
@@ -139,3 +166,9 @@ export const BASE_ADJUSTMENT_UNIFORMS = [
 
 /** 由 LUT 驱动的 uniform */
 export const LUT_UNIFORMS = ['u_lut', 'u_lutSize', 'u_lutStrength', 'u_lutEnabled'] as const;
+
+/** 由输入像素空间驱动的 uniform */
+export const INPUT_UNIFORMS = ['u_inputLinear'] as const;
+
+/** 由 Log 模式驱动的 uniform 名，定义在 renderer/log-shader.ts */
+export { LOG_UNIFORMS } from './log-shader';

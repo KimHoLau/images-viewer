@@ -23,9 +23,16 @@ React 19 + Vite 6 + TypeScript（strict）+ Zustand 5 + Vitest 3。
 
 ```
 src/
+├── color/             色彩空间数学
+│   ├── log-spaces.ts         14 种 Log 空间的数据表（顺序 = uniform 取值）
+│   ├── log-curves.ts         14 条 Log 编码/解码曲线的 CPU 实现
+│   ├── log-gamut.ts          按 id 的色域转换
+│   ├── log-index.ts          按下标的视图：曲线、正反矩阵、越界兜底
+│   └── matrices.ts           3×3 矩阵工具与 ProPhoto → sRGB 矩阵
 ├── renderer/          WebGL2 渲染与调整运算
 │   ├── ImageRenderer.ts      纹理上传、uniform、离屏导出渲染
 │   ├── shaders.ts            顶点/片元着色器（GLSL ES 3.00）
+│   ├── log-shader.ts         Log 曲线与色域矩阵的 GLSL（数值从 log-curves.ts 插值）
 │   ├── adjustments-math.ts   调整运算的 CPU 实现（GLSL 的镜像）
 │   ├── view-transform.ts     适应窗口/缩放/平移的几何计算
 │   └── renderer-registry.ts  当前渲染器登记处，供导出面板复用
@@ -37,13 +44,13 @@ src/
 ├── services/          浏览器 I/O 与纯逻辑
 │   ├── file-browser.ts       文件夹/文件打开（含降级方案）
 │   ├── image-loader.ts       统一的图片加载入口
-│   ├── raw-decoder.worker.ts RAW 解码 Worker
+│   ├── raw-decoder.worker.ts RAW 解码 Worker（sRGB 8-bit / ProPhoto linear 16-bit）
 │   ├── libraw-loader.ts      LibRaw WASM 初始化
 │   ├── thumbnail*.ts         缩略图（Worker + IndexedDB + LRU）
 │   ├── export.ts             导出（尺寸、编码、下载）
 │   └── pixel-utils.ts        位图/像素缓冲工具
 ├── store/             Zustand：应用状态 + 视图状态
-├── components/        UI 组件
+├── components/        UI 组件（含 LogPanel 色彩空间选择）
 ├── hooks/             数据加载与交互逻辑
 └── dev/webgl-check.ts 真实 WebGL 验证脚本（见下）
 ```
@@ -62,6 +69,31 @@ src/
 **LUT 放在线性运算之后。** `.cube` 这类 LUT 是按 gamma 编码后的显示值定义的，
 喂线性值会明显偏暗。所以管线是「线性空间调整 → 转回 sRGB → 套 LUT」。
 这一点与 `research/webgl-rendering.md` 里的示例不同，是有意纠正。
+
+**Log 色彩空间：把视频 LUT 用在 RAW 上。** 创意 LUT 是按 Log 编码值定义的，
+直接喂 sRGB 显示值得到的是另一回事。选中一个 Log 空间（共 14 种，与
+[Raw-Alchemy](https://github.com/shenmintao/Raw-Alchemy) 一致）之后，管线变成：
+
+```
+ProPhoto linear（RAW 16-bit 解码）→ 基础调整 → 目标 Log 色域 → Log 编码
+  → LUT（在 Log 空间）→ Log 解码 → 回 ProPhoto → ProPhoto→sRGB 原色 → 显示
+```
+
+几个要点：
+
+- **RAW 解码要跟着换。** Log 编码需要线性光与足够动态范围，8 位 sRGB 两条都不满足，
+  所以 Log 模式启用时 Worker 用 `output_bps=16 + output_color=ProPhoto + gamma(1,1)` 重新解码，
+  像素以 `Float32Array` 交给渲染器，上传成 `RGB16F` 纹理（`u_inputLinear = 1`）。
+- **只对 RAW 开放。** 非 RAW 图片拿不到线性数据，下拉框禁用而不是给出错误结果。
+- **LUT 夹在编解码之间**，强度滑块照旧在原值与 LUT 结果之间插值。
+- **显示前要换回 sRGB 原色**（`PROPHOTO_TO_SRGB`），只套 gamma 的话画面会明显发灰。
+- **关闭时逐位等同旧行为**：`u_logMode = 0` 时着色器完全不进 Log 分支。
+- Log 相关的数学是 GLSL 与 CPU 双份，数值上**只写一遍**：`log-shader.ts` 把
+  `log-curves.ts` 导出的常数插值进 GLSL，`log-shader.test.ts` 再反向核对
+  「GLSL 里出现的每个小数都必须来自那些常数」。
+
+色域矩阵与曲线参数取自 colour-science（`colour.matrix_RGB_to_RGB` 与 `cctf_encoding`），
+推导过程与出处记在 `research/log-color-spaces.md`。
 
 **内置预设不打包资源文件。** 七个预设写成采样函数，选中时现烘成 33³ 的 3D LUT 并缓存，
 风格逻辑可读可测，加预设就是加一个纯函数。
@@ -83,16 +115,21 @@ chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=60000 \
   --dump-dom http://localhost:5211/webgl-check.html
 ```
 
-结果在 dump 出来的 `WEBGL-CHECK-BEGIN` / `WEBGL-CHECK-END` 之间，共 35 项：
+结果在 dump 出来的 `WEBGL-CHECK-BEGIN` / `WEBGL-CHECK-END` 之间，共 57 项：
 
 - 着色器编译链接、默认参数下管线是恒等变换
 - 12 组调整参数下 GPU 输出与 CPU 实现一致（最大偏差 2.9/255，即量化误差量级）
 - 3D LUT 轴向正确（用换通道 LUT 验）、预设 GPU 与 CPU 一致、黑白预设输出为灰
+- **Log 模式：14 个空间逐个比对 GPU 与 CPU 输出（偏差 ≤ 0.6/255）、与 LUT 预设组合一致、
+  LUT 强度 0 等于不套 LUT、关闭后退回原路径；另外读一次 GL 错误标志，
+  因为 uniform 类型不匹配只会静默置位、不抛异常**
 - 离屏导出的尺寸、方向（readPixels 是左下原点，少翻一次就上下颠倒）、是否带上调整与 LUT
 - 导出编码成 JPEG/WebP/PNG 后能解码回来，尺寸与方向仍正确
 - 真实图片文件 → `ImageLoader` 解码 → 位图 → 渲染
 
-**改动着色器或渲染路径之后应该重跑一遍。**
+**改动着色器或渲染路径之后应该重跑一遍。** 这条规矩不是形式：Log 模式的色域矩阵最初用
+`gl.uniform3fv` 上传（mat3 不是 vec3 数组），WebGL 只置了一个 `INVALID_OPERATION`，
+矩阵全零、画面全黑，而所有单元测试都是绿的——只有这里跑一遍才现形。
 
 ## 已知限制
 
@@ -103,7 +140,18 @@ chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=60000 \
 - **RAW 解码未在真实 RAW 文件上验证过**：仓库里没有可用的 RAW 样本，
   `raw-decoder.worker` 的调用顺序与错误路径有 mock 测试覆盖（`raw-decoder.worker.test.ts`），
   但真实文件的解码结果没有实测。首次使用时请重点确认。
+  Log 模式走的 ProPhoto linear 16-bit 路径同样只有 mock 覆盖（GPU 侧的数学已在
+  `webgl-check` 里逐空间比对过，缺的是真实 RAW 那一段）。
 - **导出走 `<a download>`**：没有用 `showSaveFilePicker` 做「另存为」。
+- **Log 模式下的基础调整仍在 ProPhoto linear 上做**，亮度权重还是 Rec.709 那一组
+  （`0.2126/0.7152/0.0722`）。它和 ProPhoto 原色不是一套，影响的是高光/阴影与饱和度
+  对色相的加权方式。这里有意保持与调整功能引入时一致——本功能只做色彩空间转换，
+  不顺手改已有调整的行为。
+- **没有镜头校正与相机匹配提升**：Raw-Alchemy 在 Log 转换前还会做镜头校正与
+  饱和度/对比度补偿，这两项不在范围内。
+- **Log 模式更吃显存与内存**：ProPhoto linear 走 `Float32Array` + `RGB16F` 纹理，
+  24MP 一张大约 288MB 主线程缓冲、144MB 显存。切换 Log 空间会重新解码一次 RAW，
+  大文件上能感觉到停顿。
 
 ## 部署
 

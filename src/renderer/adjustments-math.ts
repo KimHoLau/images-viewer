@@ -1,3 +1,11 @@
+import {
+  LOG_INPUT_FLOOR,
+  applyGamutAt,
+  applyInverseGamutAt,
+  decodeLogAt,
+  encodeLogAt,
+} from '../color/log-index';
+import { PROPHOTO_TO_SRGB, applyMatrix3 } from '../color/matrices';
 import type { ImageAdjustments } from '../types/adjustments';
 import { clamp01, smoothstep } from '../utils/math';
 
@@ -29,16 +37,12 @@ export const TONE_STRENGTH = 0.5;
 
 /** sRGB 传递函数 → 线性空间（分支条件与 GLSL 的 step 对齐） */
 export function srgbToLinear(channel: number): number {
-  return channel < 0.04045
-    ? channel / 12.92
-    : Math.pow((channel + 0.055) / 1.055, 2.4);
+  return channel < 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
 }
 
 /** 线性空间 → sRGB 传递函数（分支条件与 GLSL 的 step 对齐） */
 export function linearToSrgb(channel: number): number {
-  return channel < 0.0031308
-    ? channel * 12.92
-    : 1.055 * Math.pow(channel, 1 / 2.4) - 0.055;
+  return channel < 0.0031308 ? channel * 12.92 : 1.055 * Math.pow(channel, 1 / 2.4) - 0.055;
 }
 
 export function srgbToLinearRgb(rgb: Rgb): Rgb {
@@ -115,6 +119,32 @@ export function applySaturation(rgb: Rgb, saturation: number): Rgb {
 
 function clampRgb(rgb: Rgb): Rgb {
   return [clamp01(rgb[0]), clamp01(rgb[1]), clamp01(rgb[2])];
+}
+
+/** 逐通道取 max，对应 GLSL 的 `max(texel, 0.0)` */
+function floorRgb(rgb: Rgb, floor: number): Rgb {
+  return [Math.max(rgb[0], floor), Math.max(rgb[1], floor), Math.max(rgb[2], floor)];
+}
+
+/**
+ * Log 模式的开关与选择项。
+ *
+ * 全默认（不传）时 applyAdjustments 的行为与加 Log 支持之前逐位一致：
+ * 输入按 sRGB 解释，输出也按 sRGB 解释。
+ */
+export interface LogPipelineOptions {
+  /**
+   * 输入已经是 ProPhoto linear。
+   * Log 模式的 RAW 走 16 位 ProPhoto linear 解码，像素本身就是线性的，
+   * 再套一次 sRGB 传递函数会把画面压暗一大截。
+   */
+  inputLinear?: boolean;
+  /** 是否启用 Log 色彩空间转换 */
+  logMode?: boolean;
+  /** Log 曲线下标（`LOG_SPACES` 的位置）；越界表示不做编码 */
+  logCurveId?: number;
+  /** Log 色域矩阵下标；越界表示不做色域转换 */
+  logMatrixId?: number;
 }
 
 /** 3D LUT 的最小形状；lut/types.ts 的 Lut3D 兼容 */
@@ -197,13 +227,20 @@ export function applyLut(rgb: Rgb, lut: LutSamplerSource | null, strength: numbe
  *
  * LUT 放在线性运算之后：.cube 这类 LUT 是按 gamma 编码后的显示值定义的，
  * 喂线性值会得到明显偏暗的结果。
+ *
+ * 传了 options.logMode 时改走 Log 分支（见 applyLogPipeline），
+ * 基础调整那几步仍然在同一位置、同一顺序执行。
  */
 export function applyAdjustments(
   srgb: Rgb,
   adjustments: ImageAdjustments,
   lut: LutSamplerSource | null = null,
+  options: LogPipelineOptions = {},
 ): Rgb {
-  let color = srgbToLinearRgb(clampRgb(srgb));
+  const { inputLinear = false, logMode = false, logCurveId = -1, logMatrixId = -1 } = options;
+
+  // 与 GLSL 一致：sRGB 输入先夹到 [0,1] 再转线性，ProPhoto linear 只夹负值
+  let color: Rgb = inputLinear ? floorRgb(srgb, 0) : srgbToLinearRgb(clampRgb(srgb));
 
   color = applyWhiteBalance(color, adjustments.temperature, adjustments.tint);
   color = applyExposure(color, adjustments.exposure);
@@ -211,6 +248,47 @@ export function applyAdjustments(
   color = applyHighlightsShadows(color, adjustments.highlights, adjustments.shadows);
   color = applySaturation(color, adjustments.saturation);
 
+  if (logMode) {
+    return applyLogPipeline(color, adjustments, lut, logCurveId, logMatrixId);
+  }
+
   const display = linearToSrgbRgb(clampRgb(color));
   return clampRgb(applyLut(display, lut, adjustments.lutStrength));
+}
+
+/**
+ * Log 模式的后半段，与 GLSL 里 `u_logMode > 0.5` 那一段逐行对应：
+ *
+ *   线性工作空间 → Log 色域 → Log 编码 → 套 LUT（在 Log 空间）→ Log 解码
+ *   → 回线性工作空间 → ProPhoto → sRGB 原色 → 显示
+ *
+ * LUT 夹在编解码之间是关键：视频 LUT 的定义域就是 Log 编码值。
+ * 解码后必须换回 sRGB 原色再套 gamma，只做 gamma 的话颜色会明显发灰。
+ */
+function applyLogPipeline(
+  color: Rgb,
+  adjustments: ImageAdjustments,
+  lut: LutSamplerSource | null,
+  logCurveId: number,
+  logMatrixId: number,
+): Rgb {
+  const gamut = applyGamutAt(color, logMatrixId);
+  // Log 曲线没有负半轴；抬到 LOG_INPUT_FLOOR 与 Raw-Alchemy 的 np.maximum(img, 1e-6) 一致
+  const encoded = floorRgb(gamut, LOG_INPUT_FLOOR);
+  const logColor: Rgb = [
+    encodeLogAt(encoded[0], logCurveId),
+    encodeLogAt(encoded[1], logCurveId),
+    encodeLogAt(encoded[2], logCurveId),
+  ];
+
+  const graded = applyLut(logColor, lut, adjustments.lutStrength);
+  const decoded: Rgb = [
+    decodeLogAt(graded[0], logCurveId),
+    decodeLogAt(graded[1], logCurveId),
+    decodeLogAt(graded[2], logCurveId),
+  ];
+
+  const prophoto = applyInverseGamutAt(decoded, logMatrixId);
+  const display = linearToSrgbRgb(clampRgb(applyMatrix3(PROPHOTO_TO_SRGB, prophoto)));
+  return clampRgb(display);
 }

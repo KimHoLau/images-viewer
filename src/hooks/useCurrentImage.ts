@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ImageLoader, type LoadedImage } from '../services/image-loader';
+import { ImageLoader, releaseLoadedImage, type LoadedImage } from '../services/image-loader';
 import { selectCurrentImage, useAppStore } from '../store/useAppStore';
 import type { FileEntry } from '../types/image';
 
@@ -29,6 +29,7 @@ export interface CurrentImageState {
  */
 export function useCurrentImage(): CurrentImageState {
   const current = useAppStore(selectCurrentImage);
+  const logSpaceId = useAppStore((state) => state.logSpaceId);
   const [state, setState] = useState<CurrentImageState>({
     image: null,
     loading: false,
@@ -38,7 +39,7 @@ export function useCurrentImage(): CurrentImageState {
 
   useEffect(
     () => () => {
-      latest.current?.bitmap.close();
+      releaseLoadedImage(latest.current);
       latest.current = null;
     },
     [],
@@ -46,7 +47,7 @@ export function useCurrentImage(): CurrentImageState {
 
   useEffect(() => {
     // 换图前先放掉上一张
-    latest.current?.bitmap.close();
+    releaseLoadedImage(latest.current);
     latest.current = null;
 
     if (!current) {
@@ -57,11 +58,18 @@ export function useCurrentImage(): CurrentImageState {
     let cancelled = false;
     setState({ image: null, loading: true, error: null });
 
+    // Log 模式必须重新解码：Log 编码要的是线性光与足够的动态范围，
+    // 8 位 sRGB 位图两条都不满足，所以这时候向 Worker 要 ProPhoto linear 浮点。
+    const wantsLinear = current.isRaw && logSpaceId !== null;
+
     void getLoader()
-      .load(current, { preview: true })
+      .load(current, {
+        preview: true,
+        outputColor: wantsLinear ? 'prophoto-linear' : 'srgb',
+      })
       .then((loaded) => {
         if (cancelled) {
-          loaded.bitmap.close();
+          releaseLoadedImage(loaded);
           return;
         }
         latest.current = loaded;
@@ -75,7 +83,7 @@ export function useCurrentImage(): CurrentImageState {
     return () => {
       cancelled = true;
     };
-  }, [current]);
+  }, [current, logSpaceId]);
 
   return state;
 }

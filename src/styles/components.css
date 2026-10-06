@@ -302,6 +302,17 @@
   white-space: nowrap;
 }
 
+/* ---------- Log 色彩空间 ---------- */
+
+.log-panel .field {
+  padding-top: 0;
+}
+
+.log-panel__notice {
+  margin-top: 6px;
+  color: var(--accent);
+}
+
 /* ---------- 导出 ---------- */
 
 .field {

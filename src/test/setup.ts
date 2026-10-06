@@ -30,3 +30,21 @@ if (typeof Blob !== 'undefined' && typeof Blob.prototype.text !== 'function') {
 if (typeof Element !== 'undefined' && typeof Element.prototype.scrollIntoView !== 'function') {
   Element.prototype.scrollIntoView = function scrollIntoView(): void {};
 }
+
+// jsdom 没有 ImageData，而 RAW 解码结果与离屏渲染读回的像素都要用它
+if (typeof globalThis.ImageData === 'undefined') {
+  class ImageDataPolyfill {
+    readonly data: Uint8ClampedArray;
+    readonly width: number;
+    readonly height: number;
+    readonly colorSpace: PredefinedColorSpace = 'srgb';
+
+    constructor(data: Uint8ClampedArray, width: number, height?: number) {
+      this.data = data;
+      this.width = width;
+      this.height = height ?? data.length / 4 / width;
+    }
+  }
+
+  globalThis.ImageData = ImageDataPolyfill as unknown as typeof ImageData;
+}

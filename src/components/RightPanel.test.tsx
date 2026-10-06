@@ -8,10 +8,13 @@ import { RightPanel } from './RightPanel';
 
 const initialState = useAppStore.getState();
 
-function makeImage(overrides: Partial<LoadedImage> & { metadata?: RawMetadata | null } = {}): LoadedImage {
-  const { metadata = null, ...rest } = overrides;
+function makeImage(
+  overrides: Partial<LoadedImage> & { metadata?: RawMetadata | null } = {},
+): LoadedImage {
+  const { metadata = null, linear = null, ...rest } = overrides;
   return {
     bitmap: { close: vi.fn() } as unknown as ImageBitmap,
+    linear,
     width: 6000,
     height: 4000,
     metadata,

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ImageRenderer } from '../renderer/ImageRenderer';
 import {
   computeExportSize,
   downloadBlob,
@@ -7,6 +8,7 @@ import {
   formatExtension,
   formatMimeType,
   getFormatInfo,
+  renderExport,
   suggestFileName,
 } from './export';
 
@@ -124,6 +126,92 @@ describe('formatBytes', () => {
   it('returns a dash for invalid input', () => {
     expect(formatBytes(Number.NaN)).toBe('—');
     expect(formatBytes(-1)).toBe('—');
+  });
+});
+
+describe('renderExport', () => {
+  /** jsdom 没有 OffscreenCanvas，用一个只会回一块 Blob 的替身顶上 */
+  class FakeOffscreenCanvas {
+    constructor(
+      readonly width: number,
+      readonly height: number,
+    ) {}
+
+    getContext(): { putImageData: () => void } {
+      return { putImageData: () => {} };
+    }
+
+    async convertToBlob(options: { type: string }): Promise<Blob> {
+      return new Blob(['pixels'], { type: options.type });
+    }
+  }
+
+  interface FakeRenderer {
+    getImageSize: () => { width: number; height: number };
+    renderToImageData: ReturnType<typeof vi.fn>;
+    setLogMode: ReturnType<typeof vi.fn>;
+  }
+
+  /** 渲染器持有 Log 模式等显示状态；导出只是让它离屏再画一遍 */
+  function makeRenderer(): FakeRenderer {
+    return {
+      getImageSize: () => ({ width: 6000, height: 4000 }),
+      renderToImageData: vi.fn(
+        () =>
+          ({ width: 3000, height: 2000, data: new Uint8ClampedArray(0) }) as unknown as ImageData,
+      ),
+      setLogMode: vi.fn(),
+    };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('按目标尺寸调用渲染器的离屏渲染', async () => {
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    const renderer = makeRenderer();
+
+    await renderExport(renderer as unknown as ImageRenderer, 'shot.cr2', {
+      format: 'jpeg',
+      quality: 0.9,
+      maxLongEdge: 3000,
+    });
+
+    expect(renderer.renderToImageData).toHaveBeenCalledWith(3000, 2000);
+  });
+
+  it('导出的就是渲染器画出来的那份像素', async () => {
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    const renderer = makeRenderer();
+
+    const result = await renderExport(renderer as unknown as ImageRenderer, 'shot.cr2', {
+      format: 'png',
+      quality: 1,
+      maxLongEdge: null,
+    });
+
+    // 屏幕与导出共用 renderToImageData，所以只要导出走的是它，
+    // Log 模式的曲线、色域矩阵与 LUT 设置就必然和屏幕一致
+    expect(renderer.renderToImageData).toHaveBeenCalledTimes(1);
+    expect(renderer.renderToImageData).toHaveBeenCalledWith(6000, 4000);
+    expect(result.width).toBe(6000);
+    expect(result.height).toBe(4000);
+    expect(result.fileName).toBe('shot-6000x4000.png');
+    expect(result.blob.type).toBe('image/png');
+  });
+
+  it('不改动渲染器的 Log 设置', async () => {
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    const renderer = makeRenderer();
+
+    await renderExport(renderer as unknown as ImageRenderer, 'shot.cr2', {
+      format: 'jpeg',
+      quality: 0.9,
+      maxLongEdge: 1024,
+    });
+
+    expect(renderer.setLogMode).not.toHaveBeenCalled();
   });
 });
 

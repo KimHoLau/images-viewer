@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { LOG_SPACES } from '../color/log-spaces';
 import type { Lut3D } from '../lut/types';
 import { makeBrowseResult, makeFileEntry } from '../test/fixtures';
 import { DEFAULT_ADJUSTMENTS } from '../types/adjustments';
-import { selectActiveLut, selectCurrentImage, useAppStore } from './useAppStore';
+import {
+  selectActiveLut,
+  selectCurrentImage,
+  selectHasLut,
+  selectLogSpaceIndex,
+  useAppStore,
+} from './useAppStore';
 
 const initialState = useAppStore.getState();
 
@@ -195,6 +202,71 @@ describe('useAppStore', () => {
       const custom = makeLut();
       useAppStore.getState().setCustomLut({ name: 'custom', lut: custom });
       expect(selectActiveLut(useAppStore.getState())).toBe(custom);
+    });
+  });
+
+  describe('Log 色彩空间', () => {
+    it('默认关闭', () => {
+      expect(useAppStore.getState().logSpaceId).toBeNull();
+      expect(selectLogSpaceIndex(useAppStore.getState())).toBe(-1);
+    });
+
+    it('接受表里有的 id', () => {
+      useAppStore.getState().setLogSpace('s-log3');
+
+      expect(useAppStore.getState().logSpaceId).toBe('s-log3');
+      // 下标就是着色器 uniform 的取值
+      expect(selectLogSpaceIndex(useAppStore.getState())).toBe(
+        LOG_SPACES.findIndex((space) => space.id === 's-log3'),
+      );
+    });
+
+    it('拒绝表里没有的 id，退回关闭', () => {
+      useAppStore.getState().setLogSpace('s-log3');
+      useAppStore.getState().setLogSpace('not-a-log-space');
+
+      expect(useAppStore.getState().logSpaceId).toBeNull();
+      expect(selectLogSpaceIndex(useAppStore.getState())).toBe(-1);
+    });
+
+    it('传 null 关闭', () => {
+      useAppStore.getState().setLogSpace('v-log');
+      useAppStore.getState().setLogSpace(null);
+      expect(useAppStore.getState().logSpaceId).toBeNull();
+    });
+
+    it('换文件夹时跟着复位', () => {
+      useAppStore.getState().setLogSpace('arri-logc3');
+      useAppStore.getState().setFolder(makeBrowseResult(['a.cr2']));
+
+      expect(useAppStore.getState().logSpaceId).toBeNull();
+    });
+
+    it('clearFolder 时跟着复位', () => {
+      useAppStore.getState().setLogSpace('f-log');
+      useAppStore.getState().clearFolder();
+      expect(useAppStore.getState().logSpaceId).toBeNull();
+    });
+
+    it('每个空间都能取到连续的下标', () => {
+      LOG_SPACES.forEach((space, index) => {
+        useAppStore.getState().setLogSpace(space.id);
+        expect(selectLogSpaceIndex(useAppStore.getState())).toBe(index);
+      });
+    });
+  });
+
+  describe('selectHasLut', () => {
+    it('预设与载入的 LUT 都算有', () => {
+      expect(selectHasLut(useAppStore.getState())).toBe(false);
+
+      useAppStore.getState().setLutPreset('mono');
+      expect(selectHasLut(useAppStore.getState())).toBe(true);
+
+      useAppStore.getState().setCustomLut(null);
+      useAppStore.getState().setLutPreset(null);
+      useAppStore.getState().setCustomLut({ name: 'look.cube', lut: makeLut() });
+      expect(selectHasLut(useAppStore.getState())).toBe(true);
     });
   });
 

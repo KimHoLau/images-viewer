@@ -1,9 +1,13 @@
+import { LOG_GAMUT_FORWARD, LOG_GAMUT_INVERSE } from '../color/log-index';
+import { toColumnMajorArray } from '../color/matrices';
 import { createLutTexture } from '../lut/texture';
 import type { Lut3D } from '../lut/types';
 import { flipVertically } from '../services/pixel-utils';
 import { DEFAULT_ADJUSTMENTS, type ImageAdjustments } from '../types/adjustments';
 import {
   FRAGMENT_SHADER_SOURCE,
+  INPUT_UNIFORMS,
+  LOG_UNIFORMS,
   LUT_UNIFORMS,
   VERTEX_SHADER_SOURCE,
   uniformNameFor,
@@ -16,11 +20,11 @@ import {
   type Size,
 } from './view-transform';
 
-function compileShader(
-  gl: WebGL2RenderingContext,
-  type: number,
-  source: string,
-): WebGLShader {
+/** 14 组 Log 色域矩阵，预先转成 GLSL uniform 数组要的列主序，避免每帧再算一遍 */
+const LOG_GAMUT_FORWARD_UNIFORM = toColumnMajorArray(LOG_GAMUT_FORWARD);
+const LOG_GAMUT_INVERSE_UNIFORM = toColumnMajorArray(LOG_GAMUT_INVERSE);
+
+function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type);
   if (!shader) throw new Error('Failed to create shader');
 
@@ -69,6 +73,8 @@ export class ImageRenderer {
   private readonly uniformLocations = new Map<string, WebGLUniformLocation | null>();
 
   private texture: WebGLTexture | null = null;
+  /** 当前纹理里装的是 ProPhoto linear 浮点，而不是 sRGB 8-bit */
+  private inputLinear = false;
   private lutTexture: WebGLTexture | null = null;
   private lutSize = 0;
   private imageSize: Size = { width: 0, height: 0 };
@@ -76,6 +82,10 @@ export class ImageRenderer {
   private zoom = 1;
   private pan: Point = { x: 0, y: 0 };
   private adjustments: ImageAdjustments = { ...DEFAULT_ADJUSTMENTS };
+  /** Log 模式：关闭时着色器完全不进 Log 分支，行为与加这个功能之前一致 */
+  private logMode = false;
+  private logCurveId = -1;
+  private logMatrixId = -1;
   private disposed = false;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -104,6 +114,12 @@ export class ImageRenderer {
     }
     this.uniformLocations.set('u_image', gl.getUniformLocation(this.program, 'u_image'));
     for (const name of LUT_UNIFORMS) {
+      this.uniformLocations.set(name, gl.getUniformLocation(this.program, name));
+    }
+    for (const name of INPUT_UNIFORMS) {
+      this.uniformLocations.set(name, gl.getUniformLocation(this.program, name));
+    }
+    for (const name of LOG_UNIFORMS) {
       this.uniformLocations.set(name, gl.getUniformLocation(this.program, name));
     }
 
@@ -139,13 +155,48 @@ export class ImageRenderer {
     return this.gl;
   }
 
-  /** 上传图片纹理，替换旧纹理 */
+  /** 上传 sRGB 位图纹理，替换旧纹理 */
   setImage(source: TexImageSource, width: number, height: number): void {
     this.assertUsable();
-    if (width <= 0 || height <= 0) {
-      throw new Error(`Invalid image size: ${width}x${height}`);
-    }
+    this.assertImageSize(width, height);
 
+    const gl = this.gl;
+    const texture = this.createImageTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    this.inputLinear = false;
+    this.imageSize = { width, height };
+  }
+
+  /**
+   * 上传 ProPhoto linear 浮点纹理，用于 Log 色彩空间转换。
+   *
+   * 用 RGB16F 而不是 RGBA8：线性光的暗部在 8 位里只剩几个码值，再经 Log 编码
+   * 会放大成明显的色带。RGB16F 在 WebGL2 里默认可线性过滤，显存也只占 RGBA16F 的 3/4。
+   */
+  setLinearImage(data: Float32Array, width: number, height: number): void {
+    this.assertUsable();
+    this.assertImageSize(width, height);
+
+    const gl = this.gl;
+    const texture = this.createImageTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB16F, width, height, 0, gl.RGB, gl.FLOAT, data);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    this.inputLinear = true;
+    this.imageSize = { width, height };
+  }
+
+  /** 当前纹理是不是 ProPhoto linear 浮点 */
+  isInputLinear(): boolean {
+    return this.inputLinear;
+  }
+
+  /** 建一张新的图片纹理并替换旧的；采样参数两条上传路径共用 */
+  private createImageTexture(): WebGLTexture {
     const gl = this.gl;
     if (this.texture) gl.deleteTexture(this.texture);
 
@@ -158,11 +209,15 @@ export class ImageRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
-    gl.bindTexture(gl.TEXTURE_2D, null);
 
     this.texture = texture;
-    this.imageSize = { width, height };
+    return texture;
+  }
+
+  private assertImageSize(width: number, height: number): void {
+    if (width <= 0 || height <= 0) {
+      throw new Error(`Invalid image size: ${width}x${height}`);
+    }
   }
 
   hasImage(): boolean {
@@ -200,6 +255,23 @@ export class ImageRenderer {
 
   getAdjustments(): ImageAdjustments {
     return { ...this.adjustments };
+  }
+
+  /**
+   * 设置 Log 色彩空间模式。
+   *
+   * curveId / matrixId 是 LOG_SPACES 里的下标（-1 或越界表示不转换）。
+   * 两个下标分开传是照着色器的接口来的：曲线与色域本来就可以独立更换，
+   * 现在 UI 只会成对地选同一个空间。
+   */
+  setLogMode(enabled: boolean, curveId: number, matrixId: number): void {
+    this.logMode = enabled;
+    this.logCurveId = curveId;
+    this.logMatrixId = matrixId;
+  }
+
+  getLogMode(): { enabled: boolean; curveId: number; matrixId: number } {
+    return { enabled: this.logMode, curveId: this.logCurveId, matrixId: this.logMatrixId };
   }
 
   setViewport(width: number, height: number): void {
@@ -260,6 +332,28 @@ export class ImageRenderer {
     const lutEnabledLocation = this.uniformLocations.get('u_lutEnabled');
     if (lutEnabledLocation) gl.uniform1f(lutEnabledLocation, this.lutTexture ? 1 : 0);
 
+    const inputLinearLocation = this.uniformLocations.get('u_inputLinear');
+    if (inputLinearLocation) gl.uniform1f(inputLinearLocation, this.inputLinear ? 1 : 0);
+
+    const logModeLocation = this.uniformLocations.get('u_logMode');
+    if (logModeLocation) gl.uniform1f(logModeLocation, this.logMode ? 1 : 0);
+
+    if (this.logMode) {
+      const curveLocation = this.uniformLocations.get('u_logCurveId');
+      if (curveLocation) gl.uniform1i(curveLocation, this.logCurveId);
+      const matrixLocation = this.uniformLocations.get('u_logMatrixId');
+      if (matrixLocation) gl.uniform1i(matrixLocation, this.logMatrixId);
+
+      // 一次上传 14 组矩阵，之后换空间只改 int 下标。
+      // 必须用 uniformMatrix3fv：mat3 不是 vec3 数组，uniform3fv 在 WebGL 里
+      // 会因类型不匹配报 INVALID_OPERATION，矩阵会静默地留在全零。
+      // transpose 固定 false——WebGL 不接受 true，而这里给的本来就是列主序。
+      const forwardLocation = this.uniformLocations.get('u_logGamutForward');
+      if (forwardLocation) gl.uniformMatrix3fv(forwardLocation, false, LOG_GAMUT_FORWARD_UNIFORM);
+      const inverseLocation = this.uniformLocations.get('u_logGamutInverse');
+      if (inverseLocation) gl.uniformMatrix3fv(inverseLocation, false, LOG_GAMUT_INVERSE_UNIFORM);
+    }
+
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.uniform1i(this.uniformLocations.get('u_image') ?? null, 0);
@@ -317,7 +411,13 @@ export class ImageRenderer {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTexture, 0);
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        targetTexture,
+        0,
+      );
       if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
         throw new Error('离屏帧缓冲不完整，无法导出');
       }

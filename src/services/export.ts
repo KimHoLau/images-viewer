@@ -65,7 +65,12 @@ export function formatExtension(format: ExportFormat): string {
  * 与缩略图共用同一套「放进方框」的等比缩放逻辑。
  */
 export function computeExportSize(image: Size, maxLongEdge: number | null): Size {
-  if (!Number.isFinite(image.width) || !Number.isFinite(image.height) || image.width < 1 || image.height < 1) {
+  if (
+    !Number.isFinite(image.width) ||
+    !Number.isFinite(image.height) ||
+    image.width < 1 ||
+    image.height < 1
+  ) {
     throw new Error(`图片尺寸非法: ${image.width}×${image.height}`);
   }
   if (maxLongEdge === null) {
@@ -78,11 +83,7 @@ export function computeExportSize(image: Size, maxLongEdge: number | null): Size
 }
 
 /** 去掉旧扩展名，拼上尺寸与新的扩展名 */
-export function suggestFileName(
-  originalName: string,
-  format: ExportFormat,
-  size: Size,
-): string {
+export function suggestFileName(originalName: string, format: ExportFormat, size: Size): string {
   const base = originalName.replace(/\.[^./\\]+$/, '') || 'export';
   return `${base}-${size.width}x${size.height}.${formatExtension(format)}`;
 }
@@ -159,6 +160,10 @@ export async function encodeImageData(
 /**
  * 导出：复用画布上的渲染器（图片、调整、LUT 都已经在里面），
  * 按目标尺寸离屏渲染一遍再编码。
+ *
+ * 这里刻意不去读 store 里的 logSpaceId：Log 模式、输入像素空间、曲线与色域矩阵
+ * 都是渲染器自己的状态，离屏渲染走的又是同一个 render()，所以导出结果与屏幕
+ * 天然一致。再从别处读一遍 Log 设置，只会多出一份可能对不上的真相。
  */
 export async function renderExport(
   renderer: ImageRenderer,

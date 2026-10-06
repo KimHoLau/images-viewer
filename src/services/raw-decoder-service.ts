@@ -5,12 +5,17 @@ import type {
   RawMetadata,
 } from './raw-decoder.worker';
 
-export interface DecodedRawImage {
+/**
+ * 解码结果：像素格式由 format 区分，调用方按同一个判别字段分流。
+ * 与 Worker 返回的 DecodedRawResult 相比少了 id/ok，多了尺寸的便捷访问。
+ */
+export type DecodedRawImage = {
   width: number;
   height: number;
-  pixels: Uint8ClampedArray;
   metadata: RawMetadata;
-}
+} & (
+  { format: 'rgba8'; pixels: Uint8ClampedArray } | { format: 'rgb32f-linear'; pixels: Float32Array }
+);
 
 interface PendingDecode {
   resolve: (value: DecodedRawImage) => void;
@@ -87,12 +92,13 @@ export class RawDecoderService {
     this.pending.delete(message.id);
 
     if (message.ok) {
-      job.resolve({
-        width: message.width,
-        height: message.height,
-        pixels: message.pixels,
-        metadata: message.metadata,
-      });
+      // 分支展开而不是 spread + 断言：判别联合在编译期就保持完整
+      const { width, height, metadata } = message;
+      job.resolve(
+        message.format === 'rgba8'
+          ? { width, height, metadata, format: 'rgba8', pixels: message.pixels }
+          : { width, height, metadata, format: 'rgb32f-linear', pixels: message.pixels },
+      );
     } else {
       job.reject(new Error(message.error));
     }

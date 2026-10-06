@@ -13,6 +13,7 @@ import {
 } from '../services/raw-format';
 import { selectCurrentImage, useAppStore } from '../store/useAppStore';
 import { ExportPanel } from './ExportPanel';
+import { LogPanel } from './LogPanel';
 import { LutPanel } from './LutPanel';
 import { PanelSection } from './PanelSection';
 import { Slider } from './Slider';
@@ -80,6 +81,10 @@ export function RightPanel({ image, loading = false }: RightPanelProps) {
         ) : (
           <p className="panel-hint">未选择图片</p>
         )}
+      </PanelSection>
+
+      <PanelSection title="Log 色彩空间">
+        <LogPanel />
       </PanelSection>
 
       <PanelSection

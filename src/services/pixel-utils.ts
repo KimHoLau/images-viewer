@@ -41,16 +41,60 @@ export function bitmapToRgba(
 }
 
 /**
+ * 把 16-bit 位图转成归一化到 [0,1] 的浮点 RGB，用于 Log 色彩空间管线。
+ *
+ * 不能复用 bitmapToRgba：那边把每个字节当成一个通道，16-bit 数据会被读成两倍数量的
+ * 假通道。这里按小端把相邻两个字节拼回一个 16-bit 采样（WASM 是 little-endian，
+ * LibRaw 的 processed_image_t 也是按本机字节序写出），再除以 65535。
+ *
+ * 输出恒为 3 通道：ProPhoto linear 的调用方只需要 RGB，多出来的通道就地丢掉。
+ */
+export function bitmap16ToFloatRgb(
+  data: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  colors: number,
+): Float32Array {
+  const pixels = width * height;
+  if (colors < 1 || (colors > 1 && colors < 3)) {
+    throw new Error(`Unsupported color count for 16-bit bitmap: ${colors}`);
+  }
+
+  const expected = pixels * colors * 2;
+  if (data.length < expected) {
+    throw new Error(`16-bit 像素缓冲过小：需要 ${expected} 字节，实际 ${data.length}`);
+  }
+
+  const rgb = new Float32Array(pixels * 3);
+  const sourceChannels = colors >= 4 ? 3 : colors;
+  const stride = colors * 2;
+  const scale = 1 / 65535;
+
+  for (let i = 0; i < pixels; i++) {
+    const base = i * stride;
+    if (sourceChannels === 1) {
+      const value = ((data[base + 1] << 8) | data[base]) * scale;
+      rgb[i * 3] = value;
+      rgb[i * 3 + 1] = value;
+      rgb[i * 3 + 2] = value;
+      continue;
+    }
+
+    rgb[i * 3] = ((data[base + 1] << 8) | data[base]) * scale;
+    rgb[i * 3 + 1] = ((data[base + 3] << 8) | data[base + 2]) * scale;
+    rgb[i * 3 + 2] = ((data[base + 5] << 8) | data[base + 4]) * scale;
+  }
+
+  return rgb;
+}
+
+/**
  * 原地上下翻转像素行。
  *
  * WebGL 的 readPixels 按左下原点返回，图像数据按左上原点使用，
  * 所以离屏读回的像素必须翻一次。
  */
-export function flipVertically(
-  pixels: Uint8ClampedArray,
-  width: number,
-  height: number,
-): void {
+export function flipVertically(pixels: Uint8ClampedArray, width: number, height: number): void {
   const rowBytes = width * 4;
   const expected = rowBytes * height;
   if (pixels.length < expected) {

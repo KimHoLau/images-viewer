@@ -1,5 +1,6 @@
 import { act, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { LOG_SPACES, logSpaceIndex } from '../color/log-spaces';
 import { PRESET_LUT_SIZE } from '../lut/types';
 import { DEFAULT_ADJUSTMENTS } from '../types/adjustments';
 import { useAppStore } from '../store/useAppStore';
@@ -33,10 +34,19 @@ const { rendererInstances } = vi.hoisted(() => ({
 vi.mock('../renderer/ImageRenderer', () => ({
   ImageRenderer: class {
     constructor() {
+      // 替身要像真渲染器一样记住纹理是不是线性的：Log 模式能不能开取决于它
+      let inputLinear = false;
       const instance = {
-        setImage: vi.fn(),
+        setImage: vi.fn(() => {
+          inputLinear = false;
+        }),
+        setLinearImage: vi.fn(() => {
+          inputLinear = true;
+        }),
+        isInputLinear: vi.fn(() => inputLinear),
         setAdjustments: vi.fn(),
         setLut: vi.fn(),
+        setLogMode: vi.fn(),
         setZoom: vi.fn(),
         setPan: vi.fn(),
         setViewport: vi.fn(),
@@ -135,6 +145,7 @@ describe('ImageCanvas', () => {
   it('uploads the image texture with its real dimensions', () => {
     const image = {
       bitmap: { close: vi.fn() } as unknown as ImageBitmap,
+      linear: null,
       width: 4000,
       height: 3000,
       metadata: null,
@@ -148,6 +159,95 @@ describe('ImageCanvas', () => {
   it('starts from the default adjustments', () => {
     render(<ImageCanvas image={null} />);
     expect(lastRenderer().setAdjustments).toHaveBeenCalledWith(DEFAULT_ADJUSTMENTS);
+  });
+
+  describe('Log 色彩空间模式', () => {
+    /** Log 模式的 RAW 输入：ProPhoto linear 浮点，没有位图 */
+    function linearImage(width = 4, height = 2) {
+      return {
+        bitmap: null,
+        linear: { data: new Float32Array(width * height * 3), width, height },
+        width,
+        height,
+        metadata: null,
+      };
+    }
+
+    function bitmapImage() {
+      return {
+        bitmap: { close: vi.fn() } as unknown as ImageBitmap,
+        linear: null,
+        width: 100,
+        height: 100,
+        metadata: null,
+      };
+    }
+
+    it('没选空间时关闭', () => {
+      render(<ImageCanvas image={linearImage()} />);
+      expect(lastRenderer().setLogMode).toHaveBeenCalledWith(false, -1, -1);
+    });
+
+    it('线性输入加选中空间才开启，下标取自 LOG_SPACES', () => {
+      act(() => {
+        useAppStore.getState().setLogSpace('s-log3');
+      });
+
+      render(<ImageCanvas image={linearImage()} />);
+
+      const index = logSpaceIndex('s-log3');
+      expect(index).toBe(LOG_SPACES.findIndex((space) => space.id === 's-log3'));
+      expect(lastRenderer().setLogMode).toHaveBeenCalledWith(true, index, index);
+    });
+
+    it('位图输入时即使选了空间也不开', () => {
+      act(() => {
+        useAppStore.getState().setLogSpace('s-log3');
+      });
+
+      render(<ImageCanvas image={bitmapImage()} />);
+
+      // 把 8 位 sRGB 位图送进 Log 分支只会得到错误的颜色
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1);
+    });
+
+    it('store 里换空间会立刻通知渲染器', () => {
+      render(<ImageCanvas image={linearImage()} />);
+
+      act(() => {
+        useAppStore.getState().setLogSpace('v-log');
+      });
+
+      const index = logSpaceIndex('v-log');
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(true, index, index);
+    });
+
+    it('清掉选择后回到关闭', () => {
+      act(() => {
+        useAppStore.getState().setLogSpace('v-log');
+      });
+      render(<ImageCanvas image={linearImage()} />);
+
+      act(() => {
+        useAppStore.getState().setLogSpace(null);
+      });
+
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1);
+    });
+
+    it('换图时按新纹理重新决定', () => {
+      const view = render(<ImageCanvas image={linearImage()} />);
+
+      act(() => {
+        useAppStore.getState().setLogSpace('d-log');
+      });
+      const index = logSpaceIndex('d-log');
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(true, index, index);
+
+      // 换成 JPEG：纹理不再是线性的，Log 模式必须跟着关掉
+      view.rerender(<ImageCanvas image={bitmapImage()} />);
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1);
+    });
   });
 
   describe('LUT', () => {
@@ -241,6 +341,7 @@ describe('ImageCanvas', () => {
         <ImageCanvas
           image={{
             bitmap: { close: vi.fn() } as unknown as ImageBitmap,
+            linear: null,
             width: 4000,
             height: 3000,
             metadata: null,

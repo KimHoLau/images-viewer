@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LoadedImage } from '../services/image-loader';
 import { ImageRenderer } from '../renderer/ImageRenderer';
 import { setActiveRenderer } from '../renderer/renderer-registry';
-import { selectActiveLut, useAppStore } from '../store/useAppStore';
+import {
+  selectActiveLut,
+  selectLogSpaceIndex,
+  useAppStore,
+  type AppState,
+} from '../store/useAppStore';
 import { useViewerStore } from '../store/useViewerStore';
 
 export interface ImageCanvasProps {
@@ -17,6 +22,19 @@ export interface ImageCanvasProps {
 const INTERACTIVE_RESOLUTION_SCALE = 0.5;
 /** 停手多久之后恢复全分辨率 */
 const INTERACTION_IDLE_MS = 200;
+
+/**
+ * 把 store 里的 Log 选择翻译成渲染器的调用；曲线与色域现在成对取自同一个空间。
+ *
+ * 额外要求纹理本身是 ProPhoto linear：非 RAW 图片加载出来的是 8 位 sRGB 位图，
+ * 把它送进 Log 分支只会得到错误的颜色。下拉框禁用是第一道防线，这里是第二道——
+ * 在 RAW 上选了 Log 再切到同一文件夹里的 JPEG 时，store 里的选择还在。
+ */
+function applyLogMode(renderer: ImageRenderer, state: AppState): void {
+  const index = selectLogSpaceIndex(state);
+  const enabled = index >= 0 && renderer.isInputLinear();
+  renderer.setLogMode(enabled, enabled ? index : -1, enabled ? index : -1);
+}
 
 /** 中央大图：WebGL2 纹理显示，支持滚轮缩放与拖拽平移 */
 export function ImageCanvas({ image, loading = false }: ImageCanvasProps) {
@@ -130,17 +148,19 @@ export function ImageCanvas({ image, loading = false }: ImageCanvasProps) {
     return () => observer.disconnect();
   }, [applyResolution]);
 
-  // 换图时重新上传纹理
+  // 换图时重新上传纹理：Log 模式的 RAW 是浮点线性数据，其余是 sRGB 位图。
+  // 上传之后还要重算一次 Log 模式——能不能开取决于刚换上的纹理是不是线性的。
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
 
-    if (!image) {
-      renderer.render();
-      return;
+    if (image?.linear) {
+      renderer.setLinearImage(image.linear.data, image.linear.width, image.linear.height);
+    } else if (image?.bitmap) {
+      renderer.setImage(image.bitmap, image.width, image.height);
     }
 
-    renderer.setImage(image.bitmap, image.width, image.height);
+    applyLogMode(renderer, useAppStore.getState());
     renderer.render();
   }, [image]);
 
@@ -153,6 +173,7 @@ export function ImageCanvas({ image, loading = false }: ImageCanvasProps) {
     const initialState = useAppStore.getState();
     renderer.setAdjustments(initialState.adjustments);
     renderer.setLut(selectActiveLut(initialState));
+    applyLogMode(renderer, initialState);
     renderer.render();
 
     return useAppStore.subscribe((state, previous) => {
@@ -171,6 +192,10 @@ export function ImageCanvas({ image, loading = false }: ImageCanvasProps) {
           // LUT 超出设备能力等情况：退回不使用 LUT，不让整幅图挂掉
           renderer.setLut(null);
         }
+        needsRender = true;
+      }
+      if (state.logSpaceId !== previous.logSpaceId) {
+        applyLogMode(renderer, state);
         needsRender = true;
       }
 

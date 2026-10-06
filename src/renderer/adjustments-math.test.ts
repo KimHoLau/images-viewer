@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { decodeLog, encodeLog } from '../color/log-curves';
+import { applyGamutAt, applyInverseGamutAt } from '../color/log-index';
+import { LOG_SPACES, logSpaceIndex } from '../color/log-spaces';
+import { PROPHOTO_TO_SRGB, applyMatrix3 } from '../color/matrices';
 import { generateLut3D } from '../lut/generate';
 import { DEFAULT_ADJUSTMENTS } from '../types/adjustments';
+import { clamp01 } from '../utils/math';
 import {
   applyAdjustments,
   applyContrast,
@@ -34,7 +39,7 @@ describe('sRGB 传递函数', () => {
 
   it('matches the known mid-gray transfer value', () => {
     // sRGB 0.5 → 线性约 0.2140
-    expect(srgbToLinear(0.5)).toBeCloseTo(0.2140, 4);
+    expect(srgbToLinear(0.5)).toBeCloseTo(0.214, 4);
   });
 
   it('round-trips', () => {
@@ -325,6 +330,192 @@ describe('applyAdjustments', () => {
       const half = applyAdjustments(source, { ...DEFAULT_ADJUSTMENTS, lutStrength: 0.5 }, inverted);
 
       expectRgb(half, [0.5, 0.5, 0.5], 4);
+    });
+  });
+});
+
+describe('Log 色彩空间模式', () => {
+  const samples: Rgb[] = [
+    [0, 0, 0],
+    [0.001, 0.002, 0.003],
+    [0.18, 0.18, 0.18],
+    [0.2, 0.5, 0.8],
+    [1, 1, 1],
+  ];
+
+  /** 每个空间的下标，与着色器 uniform 取的是同一个数 */
+  const SPACE_INDEX = LOG_SPACES.map((space) => logSpaceIndex(space.id));
+
+  function linearOptions(index: number) {
+    return { inputLinear: true, logMode: true, logCurveId: index, logMatrixId: index };
+  }
+
+  it('关闭时与加 Log 支持之前逐位一致', () => {
+    const settings = { ...DEFAULT_ADJUSTMENTS, exposure: 0.5, contrast: 0.2 };
+    const lut = generateLut3D(9, (rgb) => [rgb[0] * 0.9, rgb[1], rgb[2] + 0.05]);
+
+    for (const sample of samples) {
+      expectRgb(
+        applyAdjustments(sample, settings, lut, { logMode: false, inputLinear: false }),
+        applyAdjustments(sample, settings, lut),
+        12,
+      );
+    }
+  });
+
+  it('inputLinear 跳过 sRGB 传递函数', () => {
+    const source: Rgb = [0.5, 0.5, 0.5];
+    // 输入当成线性：0.5 线性就是 0.5，输出应当只有显示转换那一步
+    expectRgb(
+      applyAdjustments(source, DEFAULT_ADJUSTMENTS, null, { inputLinear: true }),
+      [linearToSrgb(0.5), linearToSrgb(0.5), linearToSrgb(0.5)],
+      10,
+    );
+    // 反过来，按 sRGB 解释时中灰仍是中灰
+    expectRgb(applyAdjustments(source, DEFAULT_ADJUSTMENTS), source, 10);
+  });
+
+  it('ProPhoto 白点跟着走到 sRGB 白点', () => {
+    const result = applyAdjustments([1, 1, 1], DEFAULT_ADJUSTMENTS, null, linearOptions(8));
+    expectRgb(result, [1, 1, 1], 4);
+  });
+
+  it('确实做了原色转换，而不是只套了一层 gamma', () => {
+    const source: Rgb = [0.2, 0.5, 0.8];
+    const logResult = applyAdjustments(source, DEFAULT_ADJUSTMENTS, null, linearOptions(8));
+    // 只套 gamma（把 ProPhoto 当成 sRGB）会得到明显偏灰的结果
+    const naive: Rgb = [linearToSrgb(source[0]), linearToSrgb(source[1]), linearToSrgb(source[2])];
+
+    const diff = Math.max(
+      Math.abs(logResult[0] - naive[0]),
+      Math.abs(logResult[1] - naive[1]),
+      Math.abs(logResult[2] - naive[2]),
+    );
+    expect(diff).toBeGreaterThan(0.01);
+  });
+
+  it('14 个空间都能跑通，且不出 NaN / 越界值', () => {
+    for (const index of SPACE_INDEX) {
+      expect(index, 'LOG_SPACES 的下标应当连续').toBeGreaterThanOrEqual(0);
+      for (const sample of samples) {
+        const result = applyAdjustments(sample, DEFAULT_ADJUSTMENTS, null, linearOptions(index));
+        for (const channel of result) {
+          expect(Number.isFinite(channel), `空间 ${index} 在 ${sample} 上出了非有限值`).toBe(true);
+          expect(channel).toBeGreaterThanOrEqual(0);
+          expect(channel).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+  });
+
+  it('Log 曲线拿不到负值：输入抬到下限而不是变 NaN', () => {
+    // 对比度/饱和度都可能把某个通道推到 0 以下
+    const settings = { ...DEFAULT_ADJUSTMENTS, contrast: 1, saturation: 1 };
+    for (const index of SPACE_INDEX) {
+      for (const channel of applyAdjustments(
+        [0.02, 0.02, 0.02],
+        settings,
+        null,
+        linearOptions(index),
+      )) {
+        expect(Number.isFinite(channel)).toBe(true);
+      }
+    }
+  });
+
+  it('未知下标原样返回，不会崩', () => {
+    // 下标越界只是「不做色域与曲线转换」，输入仍然按 ProPhoto linear 解释，
+    // 所以显示那一步的 ProPhoto → sRGB 原色转换照做
+    const source: Rgb = [0.5, 0.5, 0.5];
+    const linear = applyMatrix3(PROPHOTO_TO_SRGB, source);
+    const expected: Rgb = [
+      linearToSrgb(clamp01(linear[0])),
+      linearToSrgb(clamp01(linear[1])),
+      linearToSrgb(clamp01(linear[2])),
+    ];
+
+    expectRgb(
+      applyAdjustments(source, DEFAULT_ADJUSTMENTS, null, {
+        inputLinear: true,
+        logMode: true,
+        logCurveId: -1,
+        logMatrixId: -1,
+      }),
+      expected,
+      10,
+    );
+  });
+
+  describe('LUT 作用在 Log 空间', () => {
+    const inverted = generateLut3D(33, (rgb) => [1 - rgb[0], 1 - rgb[1], 1 - rgb[2]]);
+
+    it('LUT 的输入是 Log 编码值，不是显示值', () => {
+      const index = logSpaceIndex('s-log3');
+      const source: Rgb = [0.2, 0.5, 0.8];
+      const result = applyAdjustments(source, DEFAULT_ADJUSTMENTS, inverted, linearOptions(index));
+
+      // 按规格重推一遍：色域 → 编码 → LUT → 解码 → 回 ProPhoto → 显示。
+      // 这里故意重写而不是调被测函数，LUT 一旦挪到编码之前这条就会红。
+      const gamut = applyGamutAt(source, index);
+      const encoded: Rgb = [
+        encodeLog(gamut[0], 's-log3'),
+        encodeLog(gamut[1], 's-log3'),
+        encodeLog(gamut[2], 's-log3'),
+      ];
+      const graded: Rgb = [1 - encoded[0], 1 - encoded[1], 1 - encoded[2]];
+      const decoded: Rgb = [
+        decodeLog(graded[0], 's-log3'),
+        decodeLog(graded[1], 's-log3'),
+        decodeLog(graded[2], 's-log3'),
+      ];
+      const prophoto = applyInverseGamutAt(decoded, index);
+      const linear = applyMatrix3(PROPHOTO_TO_SRGB, prophoto);
+      const expected: Rgb = [
+        linearToSrgb(clamp01(linear[0])),
+        linearToSrgb(clamp01(linear[1])),
+        linearToSrgb(clamp01(linear[2])),
+      ];
+
+      expectRgb(result, expected, 6);
+
+      // 同时确认这跟「LUT 作用在显示空间」不是一回事
+      const displaySpace: Rgb = [
+        1 - linearToSrgb(source[0]),
+        1 - linearToSrgb(source[1]),
+        1 - linearToSrgb(source[2]),
+      ];
+      const diff = Math.max(
+        Math.abs(result[0] - displaySpace[0]),
+        Math.abs(result[1] - displaySpace[1]),
+        Math.abs(result[2] - displaySpace[2]),
+      );
+      expect(diff).toBeGreaterThan(0.05);
+    });
+
+    it('强度为 0 时不改变结果', () => {
+      const index = logSpaceIndex('arri-logc3');
+      const settings = { ...DEFAULT_ADJUSTMENTS, lutStrength: 0 };
+
+      for (const sample of samples) {
+        expectRgb(
+          applyAdjustments(sample, settings, inverted, linearOptions(index)),
+          applyAdjustments(sample, DEFAULT_ADJUSTMENTS, null, linearOptions(index)),
+          6,
+        );
+      }
+    });
+
+    it('恒等 LUT 不改变结果', () => {
+      const index = logSpaceIndex('v-log');
+      const identity = generateLut3D(33, (rgb) => rgb);
+
+      for (const sample of samples) {
+        expectRgb(
+          applyAdjustments(sample, DEFAULT_ADJUSTMENTS, identity, linearOptions(index)),
+          applyAdjustments(sample, DEFAULT_ADJUSTMENTS, null, linearOptions(index)),
+          5,
+        );
+      }
     });
   });
 });

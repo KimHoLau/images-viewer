@@ -5,6 +5,7 @@
  *   1. 着色器能否编译链接（jsdom 里验证不了）
  *   2. 默认参数下 GPU 输出是否等于输入（恒等）
  *   3. 各调整参数下 GPU 输出是否与 CPU 实现（renderer/adjustments-math.ts）一致
+ *   4. Log 色彩空间模式下 14 个空间的 GPU 输出是否与 CPU 镜像一致
  *
  * 跑法：
  *   npx vite --port 5211
@@ -13,6 +14,7 @@
  * 结果在 dump 出来的 WEBGL-CHECK-BEGIN / END 之间。
  * 改动着色器之后应该重跑一遍。
  */
+import { LOG_SPACES, logSpaceIndex } from '../color/log-spaces';
 import { ImageRenderer } from '../renderer/ImageRenderer';
 import { applyAdjustments, type Rgb } from '../renderer/adjustments-math';
 import { generateLut3D } from '../lut/generate';
@@ -35,6 +37,23 @@ function pixelAt(data: Uint8ClampedArray, index: number): Rgb {
 
 function maxChannelDiff(a: Rgb, b: Rgb): number {
   return Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2]));
+}
+
+/**
+ * 读一次 GL 错误标志。
+ *
+ * WebGL 的 uniform / 纹理上传出错只会置位错误标志，不会抛异常——比如把 mat3
+ * 交给 uniform3fv（类型不匹配）会静默地什么都不写。这类 bug 只有在这里才抓得到。
+ */
+function reportGlError(renderer: ImageRenderer, label: string): number {
+  const gl = renderer.context;
+  const error = gl.getError();
+  report(
+    label,
+    error === gl.NO_ERROR,
+    error === gl.NO_ERROR ? 'NO_ERROR' : `0x${error.toString(16)}`,
+  );
+  return error;
 }
 
 /** 测试像素，覆盖暗部、中灰、饱和色、纯白 */
@@ -137,13 +156,21 @@ async function run(): Promise<void> {
         const expected = applyAdjustments(source, settings);
         worst = Math.max(worst, maxChannelDiff(pixelAt(gpu, index), expected));
       });
-      report(`GPU 与 CPU 一致（${label}）`, worst <= 3 / 255, `最大偏差 ${(worst * 255).toFixed(1)}/255`);
+      report(
+        `GPU 与 CPU 一致（${label}）`,
+        worst <= 3 / 255,
+        `最大偏差 ${(worst * 255).toFixed(1)}/255`,
+      );
     }
 
     // 3. 曝光 +1 应当让线性亮度翻倍
     const base = applyAdjustments([0.3, 0.3, 0.3], { ...DEFAULT_ADJUSTMENTS });
     const lifted = applyAdjustments([0.3, 0.3, 0.3], { ...DEFAULT_ADJUSTMENTS, exposure: 1 });
-    report('曝光 +1 提亮画面', lifted[0] > base[0], `${base[0].toFixed(3)} → ${lifted[0].toFixed(3)}`);
+    report(
+      '曝光 +1 提亮画面',
+      lifted[0] > base[0],
+      `${base[0].toFixed(3)} → ${lifted[0].toFixed(3)}`,
+    );
 
     // 4. 3D LUT：轴向是否正确
     //    换通道 LUT（R←B、G←R、B←G）能一次性验出采样坐标有没有搞错轴序。
@@ -167,17 +194,25 @@ async function run(): Promise<void> {
     const lutCases: Array<[string, ImageAdjustments, typeof monoLut]> = [
       ['黑白预设', { ...DEFAULT_ADJUSTMENTS }, monoLut],
       ['冷调预设 + 曝光 0.5', { ...DEFAULT_ADJUSTMENTS, exposure: 0.5 }, coolLut],
-      ['暖调预设 + 强度 0.4', { ...DEFAULT_ADJUSTMENTS, lutStrength: 0.4 }, getPresetLut('warm-film')!],
-      ['预设 + 全部调整', {
-        temperature: 0.3,
-        tint: -0.2,
-        exposure: 0.4,
-        contrast: 0.3,
-        highlights: -0.2,
-        shadows: 0.4,
-        saturation: 0.2,
-        lutStrength: 0.8,
-      }, coolLut],
+      [
+        '暖调预设 + 强度 0.4',
+        { ...DEFAULT_ADJUSTMENTS, lutStrength: 0.4 },
+        getPresetLut('warm-film')!,
+      ],
+      [
+        '预设 + 全部调整',
+        {
+          temperature: 0.3,
+          tint: -0.2,
+          exposure: 0.4,
+          contrast: 0.3,
+          highlights: -0.2,
+          shadows: 0.4,
+          saturation: 0.2,
+          lutStrength: 0.8,
+        },
+        coolLut,
+      ],
     ];
 
     for (const [label, settings, lut] of lutCases) {
@@ -203,7 +238,11 @@ async function run(): Promise<void> {
       const [r, g, b] = pixelAt(greyed, index);
       worstGrey = Math.max(worstGrey, Math.abs(r - g), Math.abs(g - b));
     }
-    report('黑白预设输出为灰', worstGrey <= 3 / 255, `最大通道差 ${(worstGrey * 255).toFixed(1)}/255`);
+    report(
+      '黑白预设输出为灰',
+      worstGrey <= 3 / 255,
+      `最大通道差 ${(worstGrey * 255).toFixed(1)}/255`,
+    );
 
     // 7. 强度 0 时即使绑着 LUT 也应等于原图
     renderer.setLut(monoLut);
@@ -212,7 +251,11 @@ async function run(): Promise<void> {
     TEST_PIXELS.forEach((source, index) => {
       worstZero = Math.max(worstZero, maxChannelDiff(pixelAt(strengthZero, index), source));
     });
-    report('LUT 强度 0 等于原图', worstZero <= 3 / 255, `最大偏差 ${(worstZero * 255).toFixed(1)}/255`);
+    report(
+      'LUT 强度 0 等于原图',
+      worstZero <= 3 / 255,
+      `最大偏差 ${(worstZero * 255).toFixed(1)}/255`,
+    );
 
     // 8. 清除 LUT 后回到原图
     renderer.setLut(null);
@@ -221,12 +264,19 @@ async function run(): Promise<void> {
     TEST_PIXELS.forEach((source, index) => {
       worstCleared = Math.max(worstCleared, maxChannelDiff(pixelAt(cleared, index), source));
     });
-    report('清除 LUT 后回到原图', worstCleared <= 3 / 255, `最大偏差 ${(worstCleared * 255).toFixed(1)}/255`);
+    report(
+      '清除 LUT 后回到原图',
+      worstCleared <= 3 / 255,
+      `最大偏差 ${(worstCleared * 255).toFixed(1)}/255`,
+    );
 
-    // 9. 离屏导出：尺寸、方向、是否带上调整与 LUT
+    // 9. Log 色彩空间模式（票 12）
+    checkLogMode(renderer);
+
+    // 10. 离屏导出：尺寸、方向、是否带上调整与 LUT
     await checkExport(renderer, monoLut);
 
-    // 10. 文件 → 解码 → 显示 的主路径
+    // 11. 文件 → 解码 → 显示 的主路径
     await checkImageLoading(renderer);
   } catch (error) {
     report('渲染流程', false, (error as Error).message);
@@ -239,6 +289,115 @@ async function run(): Promise<void> {
 
 function finish(): void {
   results.textContent = `WEBGL-CHECK-BEGIN\n${lines.join('\n')}\nWEBGL-CHECK-END`;
+}
+
+/**
+ * Log 色彩空间模式的验证（票 12 的 #17 / #18）。
+ *
+ * 单元测试只能盯住 GLSL 与 CPU 两份源码的「结构与常数一致」，真正的数值一致
+ * 只有在这里跑得出来：14 个空间逐个把 GPU 输出与 CPU 镜像比对。
+ *
+ * 结束前必须把输入空间与 Log 模式复位——后面的导出检查用的是 sRGB 位图，
+ * 留着 Log 模式会让它走错分支。
+ */
+function checkLogMode(renderer: ImageRenderer): void {
+  const W = WIDTH;
+  const H = HEIGHT;
+
+  // Log 模式的 RAW 解码输出是浮点线性：这里直接喂 RGB16F 纹理
+  const linear = new Float32Array(W * H * 3);
+  TEST_PIXELS.forEach((rgb, index) => {
+    linear[index * 3] = rgb[0];
+    linear[index * 3 + 1] = rgb[1];
+    linear[index * 3 + 2] = rgb[2];
+  });
+
+  renderer.setViewport(W, H);
+  renderer.setLinearImage(linear, W, H);
+  renderer.setLut(null);
+  report('ProPhoto linear 浮点纹理能上传', renderer.isInputLinear(), 'RGB16F');
+  reportGlError(renderer, '上传浮点纹理没有 GL 错误');
+
+  const logOptions = (index: number) => ({
+    inputLinear: true,
+    logMode: true,
+    logCurveId: index,
+    logMatrixId: index,
+  });
+
+  let worstAll = 0;
+  LOG_SPACES.forEach((space, index) => {
+    renderer.setLogMode(true, index, index);
+    const gpu = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
+    let worst = 0;
+    TEST_PIXELS.forEach((source, at) => {
+      const expected = applyAdjustments(
+        source,
+        { ...DEFAULT_ADJUSTMENTS },
+        null,
+        logOptions(index),
+      );
+      worst = Math.max(worst, maxChannelDiff(pixelAt(gpu, at), expected));
+    });
+    worstAll = Math.max(worstAll, worst);
+    report(
+      `Log 模式 GPU 与 CPU 一致（${space.name}）`,
+      worst <= 4 / 255,
+      `最大偏差 ${(worst * 255).toFixed(1)}/255`,
+    );
+  });
+
+  // 与各种 LUT 预设组合：黑白 + 冷暖各挑一个，覆盖不同形态的 3D LUT
+  const slog3 = logSpaceIndex('s-log3');
+  reportGlError(renderer, 'Log 模式的 uniform 上传没有 GL 错误');
+  for (const presetId of ['mono', 'cool-cinema', 'warm-film'] as const) {
+    const lut = getPresetLut(presetId)!;
+    renderer.setLogMode(true, slog3, slog3);
+    renderer.setLut(lut);
+    const gpu = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
+    let worst = 0;
+    TEST_PIXELS.forEach((source, at) => {
+      const expected = applyAdjustments(source, { ...DEFAULT_ADJUSTMENTS }, lut, logOptions(slog3));
+      worst = Math.max(worst, maxChannelDiff(pixelAt(gpu, at), expected));
+    });
+    report(
+      `Log 模式 + LUT 预设 GPU 与 CPU 一致（${presetId}）`,
+      worst <= 5 / 255,
+      `最大偏差 ${(worst * 255).toFixed(1)}/255`,
+    );
+  }
+
+  // 强度 0 时 Log 模式应当等于不套 LUT
+  renderer.setLut(getPresetLut('mono')!);
+  const strengthZero = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS, lutStrength: 0 });
+  renderer.setLut(null);
+  const noLut = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
+  let worstZero = 0;
+  for (let index = 0; index < W; index++) {
+    worstZero = Math.max(
+      worstZero,
+      maxChannelDiff(pixelAt(strengthZero, index), pixelAt(noLut, index)),
+    );
+  }
+  report(
+    'Log 模式下 LUT 强度 0 等于不套 LUT',
+    worstZero <= 3 / 255,
+    `最大偏差 ${(worstZero * 255).toFixed(1)}/255`,
+  );
+
+  // 关掉 Log 模式并换回 sRGB 位图，后面几步走的还是老路径
+  renderer.setLogMode(false, -1, -1);
+  renderer.setImage(buildImageData(), W, H);
+  const restored = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
+  let worstRestored = 0;
+  TEST_PIXELS.forEach((source, index) => {
+    worstRestored = Math.max(worstRestored, maxChannelDiff(pixelAt(restored, index), source));
+  });
+  report(
+    '关闭 Log 模式后回到原路径（14 个空间整体）',
+    worstRestored <= 3 / 255,
+    `各空间最大偏差 ${(worstAll * 255).toFixed(1)}/255，复位后 ${(worstRestored * 255).toFixed(1)}/255`,
+  );
 }
 
 /** 从 ImageData 里取某个像素的 sRGB 颜色 */
@@ -418,6 +577,7 @@ async function checkImageLoading(renderer: ImageRenderer): Promise<void> {
     renderer.setLut(null);
     renderer.setAdjustments({ ...DEFAULT_ADJUSTMENTS });
     renderer.setViewport(width, height);
+    if (!loaded.bitmap) throw new Error('常规图片应当解出 ImageBitmap');
     renderer.setImage(loaded.bitmap, loaded.width, loaded.height);
 
     const rendered = renderer.renderToImageData(width, height);
