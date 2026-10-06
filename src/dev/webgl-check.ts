@@ -318,11 +318,19 @@ function checkLogMode(renderer: ImageRenderer): void {
   report('ProPhoto linear 浮点纹理能上传', renderer.isInputLinear(), 'RGB16F');
   reportGlError(renderer, '上传浮点纹理没有 GL 错误');
 
-  const logOptions = (index: number) => ({
+  /**
+   * Log 模式的两套 CPU 期望值。
+   *
+   * `lutOutputEncoded = true` 是「LUT 输出仍在 Log」那条路（串联 Log LUT 用），
+   * 缺省 false 表示 LUT 输出已经是显示空间（ARRI 的 LogC4 → Rec.709 就是）。
+   * 两条路都要跟 GPU 对上，因为它们在着色器里是两个分支。
+   */
+  const logOptions = (index: number, lutOutputEncoded = false) => ({
     inputLinear: true,
     logMode: true,
     logCurveId: index,
     logMatrixId: index,
+    lutOutputEncoded,
   });
 
   let worstAll = 0;
@@ -421,8 +429,58 @@ function checkLogMode(renderer: ImageRenderer): void {
     `最大偏差 ${(worstZero * 255).toFixed(1)}/255`,
   );
 
-  // 关掉 Log 模式并换回 sRGB 位图，后面几步走的还是老路径
-  renderer.setLogMode(false, -1, -1);
+  // LUT 输出空间两条路都要跟 CPU 对上。默认（显示空间）不再做 Log 解码；
+  // 置 true 时保留旧的「输出仍是 Log」路径。用同一个 LUT 各跑一遍，
+  // 顺带钉住「两种解释会给出不同结果」——否则这个开关等于没接。
+  {
+    const lut = getPresetLut('warm-film')!;
+    renderer.setLut(lut);
+    for (const encoded of [false, true]) {
+      renderer.setLogMode(true, slog3, slog3, encoded);
+      const gpu = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
+      let worst = 0;
+      TEST_PIXELS.forEach((source, at) => {
+        const expected = applyAdjustments(
+          source,
+          { ...DEFAULT_ADJUSTMENTS },
+          lut,
+          logOptions(slog3, encoded),
+        );
+        worst = Math.max(worst, maxChannelDiff(pixelAt(gpu, at), expected));
+      });
+      report(
+        `Log 模式 LUT 输出为${encoded ? ' Log 空间' : '显示空间'}时 GPU 与 CPU 一致`,
+        worst <= 6 / 255,
+        `最大偏差 ${(worst * 255).toFixed(1)}/255`,
+      );
+    }
+
+    const displaySpace = applyAdjustments(
+      TEST_PIXELS[3],
+      { ...DEFAULT_ADJUSTMENTS },
+      lut,
+      logOptions(slog3, false),
+    );
+    const encodedSpace = applyAdjustments(
+      TEST_PIXELS[3],
+      { ...DEFAULT_ADJUSTMENTS },
+      lut,
+      logOptions(slog3, true),
+    );
+    const gap = maxChannelDiff(displaySpace, encodedSpace);
+    report(
+      'LUT 输出空间两种解释确实不同（开关真的接上了）',
+      gap > 0.02,
+      `同一像素差 ${(gap * 255).toFixed(1)}/255`,
+    );
+    // 这一块挂了 warm-film，后面的复位检查是拿「无 LUT」当基准的，必须摘掉
+    renderer.setLut(null);
+  }
+
+  // 关掉 Log 模式并换回 sRGB 位图，后面几步走的还是老路径。
+  // 注意第 4 个参数也要复位：上面那块把它留成了 true（输出仍是 Log），
+  // 不清掉的话关闭 Log 之后显示的仍是「按 Log 解码」的旧结果。
+  renderer.setLogMode(false, -1, -1, false);
   renderer.setImage(buildImageData(), W, H);
   const restored = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
   let worstRestored = 0;

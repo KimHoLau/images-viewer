@@ -33,7 +33,12 @@ const INTERACTION_IDLE_MS = 200;
 function applyLogMode(renderer: ImageRenderer, state: AppState): void {
   const index = selectLogSpaceIndex(state);
   const enabled = index >= 0 && renderer.isInputLinear();
-  renderer.setLogMode(enabled, enabled ? index : -1, enabled ? index : -1);
+  renderer.setLogMode(
+    enabled,
+    enabled ? index : -1,
+    enabled ? index : -1,
+    state.lutOutputEncoded,
+  );
 }
 
 /** 中央大图：WebGL2 纹理显示，支持滚轮缩放与拖拽平移 */
@@ -185,7 +190,11 @@ export function ImageCanvas({ image, loading = false }: ImageCanvasProps) {
         // 拖滑块也是交互，先降分辨率
         notifyInteraction();
       }
-      if (state.lutPresetId !== previous.lutPresetId || state.customLut !== previous.customLut) {
+      if (
+        state.lutPresetId !== previous.lutPresetId ||
+        state.customLutKey !== previous.customLutKey ||
+        state.lutLibrary !== previous.lutLibrary
+      ) {
         try {
           renderer.setLut(selectActiveLut(state));
         } catch {
@@ -194,7 +203,10 @@ export function ImageCanvas({ image, loading = false }: ImageCanvasProps) {
         }
         needsRender = true;
       }
-      if (state.logSpaceId !== previous.logSpaceId) {
+      if (
+        state.logSpaceId !== previous.logSpaceId ||
+        state.lutOutputEncoded !== previous.lutOutputEncoded
+      ) {
         applyLogMode(renderer, state);
         needsRender = true;
       }

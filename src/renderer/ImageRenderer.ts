@@ -86,6 +86,8 @@ export class ImageRenderer {
   private logMode = false;
   private logCurveId = -1;
   private logMatrixId = -1;
+  /** LUT 的输出是否仍在 Log 空间；默认 false（已是显示空间） */
+  private lutOutputEncoded = false;
   private disposed = false;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -263,15 +265,35 @@ export class ImageRenderer {
    * curveId / matrixId 是 LOG_SPACES 里的下标（-1 或越界表示不转换）。
    * 两个下标分开传是照着色器的接口来的：曲线与色域本来就可以独立更换，
    * 现在 UI 只会成对地选同一个空间。
+   *
+   * `lutOutputEncoded` 决定 LUT 采样之后那一步：默认 `false` 表示 LUT 的输出
+   * 已经是显示空间（ARRI 的 LogC4 → Rec.709 就是），直接按 Rec.709 γ2.4 转 sRGB；
+   * `true` 表示输出仍是 Log，需要解码回工作空间再显示。
    */
-  setLogMode(enabled: boolean, curveId: number, matrixId: number): void {
+  setLogMode(
+    enabled: boolean,
+    curveId: number,
+    matrixId: number,
+    lutOutputEncoded = false,
+  ): void {
     this.logMode = enabled;
     this.logCurveId = curveId;
     this.logMatrixId = matrixId;
+    this.lutOutputEncoded = lutOutputEncoded;
   }
 
-  getLogMode(): { enabled: boolean; curveId: number; matrixId: number } {
-    return { enabled: this.logMode, curveId: this.logCurveId, matrixId: this.logMatrixId };
+  getLogMode(): {
+    enabled: boolean;
+    curveId: number;
+    matrixId: number;
+    lutOutputEncoded: boolean;
+  } {
+    return {
+      enabled: this.logMode,
+      curveId: this.logCurveId,
+      matrixId: this.logMatrixId,
+      lutOutputEncoded: this.lutOutputEncoded,
+    };
   }
 
   setViewport(width: number, height: number): void {
@@ -331,6 +353,10 @@ export class ImageRenderer {
     if (lutSizeLocation) gl.uniform1f(lutSizeLocation, this.lutSize);
     const lutEnabledLocation = this.uniformLocations.get('u_lutEnabled');
     if (lutEnabledLocation) gl.uniform1f(lutEnabledLocation, this.lutTexture ? 1 : 0);
+    const lutOutputEncodedLocation = this.uniformLocations.get('u_lutOutputEncoded');
+    if (lutOutputEncodedLocation) {
+      gl.uniform1f(lutOutputEncodedLocation, this.lutOutputEncoded ? 1 : 0);
+    }
 
     const inputLinearLocation = this.uniformLocations.get('u_inputLinear');
     if (inputLinearLocation) gl.uniform1f(inputLinearLocation, this.inputLinear ? 1 : 0);

@@ -186,7 +186,7 @@ describe('ImageCanvas', () => {
 
     it('没选空间时关闭', () => {
       render(<ImageCanvas image={linearImage()} />);
-      expect(lastRenderer().setLogMode).toHaveBeenCalledWith(false, -1, -1);
+      expect(lastRenderer().setLogMode).toHaveBeenCalledWith(false, -1, -1, false);
     });
 
     it('线性输入加选中空间才开启，下标取自 LOG_SPACES', () => {
@@ -198,7 +198,7 @@ describe('ImageCanvas', () => {
 
       const index = logSpaceIndex('s-log3');
       expect(index).toBe(LOG_SPACES.findIndex((space) => space.id === 's-log3'));
-      expect(lastRenderer().setLogMode).toHaveBeenCalledWith(true, index, index);
+      expect(lastRenderer().setLogMode).toHaveBeenCalledWith(true, index, index, false);
     });
 
     it('位图输入时即使选了空间也不开', () => {
@@ -209,7 +209,7 @@ describe('ImageCanvas', () => {
       render(<ImageCanvas image={bitmapImage()} />);
 
       // 把 8 位 sRGB 位图送进 Log 分支只会得到错误的颜色
-      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1);
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1, false);
     });
 
     it('store 里换空间会立刻通知渲染器', () => {
@@ -220,7 +220,24 @@ describe('ImageCanvas', () => {
       });
 
       const index = logSpaceIndex('v-log');
-      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(true, index, index);
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(true, index, index, false);
+    });
+
+    it('切换 LUT 输出空间会立刻通知渲染器', () => {
+      act(() => {
+        useAppStore.getState().setLogSpace('arri-logc4');
+      });
+      render(<ImageCanvas image={linearImage()} />);
+
+      const index = logSpaceIndex('arri-logc4');
+      // 默认：LUT 输出已是显示空间
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(true, index, index, false);
+
+      act(() => {
+        useAppStore.getState().setLutOutputEncoded(true);
+      });
+
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(true, index, index, true);
     });
 
     it('清掉选择后回到关闭', () => {
@@ -233,7 +250,7 @@ describe('ImageCanvas', () => {
         useAppStore.getState().setLogSpace(null);
       });
 
-      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1);
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1, false);
     });
 
     it('换图时按新纹理重新决定', () => {
@@ -243,11 +260,11 @@ describe('ImageCanvas', () => {
         useAppStore.getState().setLogSpace('d-log');
       });
       const index = logSpaceIndex('d-log');
-      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(true, index, index);
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(true, index, index, false);
 
       // 换成 JPEG：纹理不再是线性的，Log 模式必须跟着关掉
       view.rerender(<ImageCanvas image={bitmapImage()} />);
-      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1);
+      expect(lastRenderer().setLogMode).toHaveBeenLastCalledWith(false, -1, -1, false);
     });
   });
 
