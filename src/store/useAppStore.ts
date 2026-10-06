@@ -8,7 +8,10 @@ import { DEFAULT_ADJUSTMENTS, clampAdjustment, type ImageAdjustments } from '../
 export type AppStatus = 'empty' | 'loading' | 'ready' | 'error';
 
 /** 用户从文件载入的 LUT */
-export interface CustomLut {
+export interface LoadedLut {
+  /** 库里的唯一键：同名再导入视为替换，键保持不变 */
+  key: string;
+  /** 展示名：优先用 LUT 自带的 TITLE，没有就用文件名 */
   name: string;
   lut: Lut3D;
 }
@@ -27,10 +30,25 @@ export interface AppState {
   adjustments: ImageAdjustments;
   /** 当前选中的内置预设 id，null 为不使用 */
   lutPresetId: string | null;
-  /** 从文件载入的 LUT，优先于预设 */
-  customLut: CustomLut | null;
+  /**
+   * 已从文件载入的 LUT 库，按导入顺序。
+   *
+   * 库与「当前选中」是两件事：可以导入一堆 LUT 而一个都不选中。
+   * 同名（按展示名）再导入视为替换那个条目，列表与选择都不会跳。
+   */
+  lutLibrary: LoadedLut[];
+  /** 库中当前生效的 LUT 键；null 表示不用自定义 LUT（回落到预设或原图） */
+  customLutKey: string | null;
   /** 当前选中的 Log 色彩空间，null 表示关闭（按 sRGB 显示） */
   logSpaceId: LogSpaceId | null;
+  /**
+   * LUT 的输出是否仍在 Log 空间。
+   *
+   * 默认 false：LUT 输出已是显示空间，直接显示——ARRI 的 `LogC4 → Rec.709` 这类
+   * 技术转换就是这样，把它当 Log 再解码一次会得到纯青的天空。
+   * 置 true 用于串联「Log 进、Log 出」的 LUT。
+   */
+  lutOutputEncoded: boolean;
 
   // ---- actions ----
   setFolder: (result: FolderBrowseResult) => void;
@@ -41,9 +59,18 @@ export interface AppState {
   setAdjustment: <K extends keyof ImageAdjustments>(key: K, value: number) => void;
   resetAdjustments: () => void;
   setLutPreset: (presetId: string | null) => void;
-  setCustomLut: (entry: CustomLut | null) => void;
+  /**
+   * 把一批解析好的 LUT 加进库（同名替换），并在当前没有选中项时自动选第一个。
+   */
+  addCustomLuts: (entries: Array<Omit<LoadedLut, 'key'>>) => void;
+  /** 选中库里的某个 LUT；传 null 表示不用自定义 LUT */
+  setActiveCustomLut: (key: string | null) => void;
+  /** 从库里移除一个 LUT；移除的是当前选中项时自动回退 */
+  removeCustomLut: (key: string) => void;
   /** 传 null 或未知 id 都表示关闭 Log 模式 */
   setLogSpace: (id: string | null) => void;
+  /** LUT 的输出是否仍在 Log 空间；见 AppState.lutOutputEncoded */
+  setLutOutputEncoded: (encoded: boolean) => void;
   setStatus: (status: AppStatus) => void;
   setError: (message: string | null) => void;
 }
@@ -53,13 +80,22 @@ function isValidIndex(index: number): boolean {
   return Number.isInteger(index) && index >= 0;
 }
 
-/** 编辑态复位：换文件夹时把调整参数、LUT 与 Log 选择一起清掉 */
+/** 已导入 LUT 的键计数器；模块级，与 store 生命周期一致 */
+let nextLutKey = 1;
+
+/**
+ * 编辑态复位：换文件夹时把调整参数、LUT 选择与 Log 选择清掉。
+ *
+ * `lutLibrary` **不清**：导入的 LUT 是用户花了功夫准备的素材，换文件夹不该丢；
+ * 换文件夹时只是不再选中它（回落到原图）。
+ */
 function clearedEditState() {
   return {
     adjustments: { ...DEFAULT_ADJUSTMENTS },
     lutPresetId: null,
-    customLut: null,
+    customLutKey: null,
     logSpaceId: null,
+    lutOutputEncoded: false,
   };
 }
 
@@ -71,8 +107,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   error: null,
   adjustments: { ...DEFAULT_ADJUSTMENTS },
   lutPresetId: null,
-  customLut: null,
+  lutLibrary: [],
+  customLutKey: null,
   logSpaceId: null,
+  lutOutputEncoded: false,
 
   setFolder: (result) => {
     const hasImages = result.images.length > 0;
@@ -123,14 +161,56 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   resetAdjustments: () => set({ adjustments: { ...DEFAULT_ADJUSTMENTS } }),
 
-  setLutPreset: (presetId) => set({ lutPresetId: presetId, customLut: null }),
+  setLutPreset: (presetId) => set({ lutPresetId: presetId, customLutKey: null }),
 
-  setCustomLut: (entry) => set({ customLut: entry, lutPresetId: null }),
+  addCustomLuts: (entries) =>
+    set((state) => {
+      const library = [...state.lutLibrary];
+      for (const entry of entries) {
+        const existing = library.findIndex((item) => item.name === entry.name);
+        // 同名视为替换：键保持不变，选择与顺序都不会跳
+        const key = existing >= 0 ? library[existing].key : `lut-${nextLutKey++}`;
+        const loaded: LoadedLut = { ...entry, key };
+        if (existing >= 0) library[existing] = loaded;
+        else library.push(loaded);
+      }
+
+      // 目前没选中任何自定义 LUT 时，导入后自动选第一个，省掉一次手动点击
+      const selectedExists =
+        state.customLutKey !== null && library.some((item) => item.key === state.customLutKey);
+      const customLutKey = selectedExists ? state.customLutKey : (library[0]?.key ?? null);
+      const lutPresetId = customLutKey !== null ? null : state.lutPresetId;
+
+      return { lutLibrary: library, customLutKey, lutPresetId };
+    }),
+
+  setActiveCustomLut: (key) =>
+    set((state) => {
+      if (key === null) return { customLutKey: null };
+      // 只认库里有的键：UI 传回来的字符串不可信
+      if (!state.lutLibrary.some((item) => item.key === key)) return {};
+      return { customLutKey: key, lutPresetId: null };
+    }),
+
+  removeCustomLut: (key) =>
+    set((state) => {
+      const library = state.lutLibrary.filter((item) => item.key !== key);
+      if (library.length === state.lutLibrary.length) return {};
+
+      // 删掉的是当前选中项就回退到剩下的第一个；不是的话保持选择
+      let customLutKey = state.customLutKey;
+      if (customLutKey !== null && !library.some((item) => item.key === customLutKey)) {
+        customLutKey = library[0]?.key ?? null;
+      }
+      return { lutLibrary: library, customLutKey };
+    }),
 
   // 只认表里有的 id：UI 传回来的字符串不可信，脏值会让着色器下标越界。
   // 关掉（null）与「不认识」都落到 null，所以分开判断，不拿空串当哨兵。
   setLogSpace: (id) =>
     set({ logSpaceId: (id === null ? undefined : findLogSpace(id))?.id ?? null }),
+
+  setLutOutputEncoded: (encoded) => set({ lutOutputEncoded: encoded }),
 
   setStatus: (status) => set({ status }),
 
@@ -144,9 +224,22 @@ export function selectCurrentImage(state: AppState): FileEntry | null {
   return images[currentIndex];
 }
 
-/** 当前生效的 LUT：载入的 LUT 优先，其次内置预设，都没有则为 null */
+/**
+ * 当前生效的 LUT：选中的自定义 LUT 优先，其次内置预设，都没有则为 null。
+ *
+ * 选择项指向一个已不存在的键（库被清过）时按「没选」处理，回落预设。
+ */
 export function selectActiveLut(state: AppState): Lut3D | null {
-  return resolveActiveLut(state.customLut?.lut ?? null, state.lutPresetId);
+  const custom = state.lutLibrary.find((item) => item.key === state.customLutKey)?.lut ?? null;
+  return resolveActiveLut(custom, state.lutPresetId);
+}
+
+/**
+ * 选中的自定义 LUT；没有选中或键已失效时为 null。
+ * UI 需要拿到名字与库条目时用它，别自己 find。
+ */
+export function selectCustomLut(state: AppState): LoadedLut | null {
+  return state.lutLibrary.find((item) => item.key === state.customLutKey) ?? null;
 }
 
 /**
@@ -159,5 +252,5 @@ export function selectLogSpaceIndex(state: AppState): number {
 
 /** 是否挂了 LUT（内置预设或载入的文件），用来提示 LUT 会在 Log 空间里作用 */
 export function selectHasLut(state: AppState): boolean {
-  return state.lutPresetId !== null || state.customLut !== null;
+  return selectActiveLut(state) !== null;
 }

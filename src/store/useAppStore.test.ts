@@ -6,6 +6,7 @@ import { DEFAULT_ADJUSTMENTS } from '../types/adjustments';
 import {
   selectActiveLut,
   selectCurrentImage,
+  selectCustomLut,
   selectHasLut,
   selectLogSpaceIndex,
   useAppStore,
@@ -163,28 +164,171 @@ describe('useAppStore', () => {
       expect(useAppStore.getState().lutPresetId).toBeNull();
     });
 
-    it('drops an imported LUT when a preset is chosen', () => {
-      useAppStore.getState().setCustomLut({ name: 'x', lut: makeLut() });
+    it('drops the imported-LUT selection when a preset is chosen', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'x', lut: makeLut() }]);
       useAppStore.getState().setLutPreset('mono');
 
-      expect(useAppStore.getState().customLut).toBeNull();
+      expect(useAppStore.getState().customLutKey).toBeNull();
       expect(useAppStore.getState().lutPresetId).toBe('mono');
+    });
+
+    it('keeps the imported library around', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'x', lut: makeLut() }]);
+      useAppStore.getState().setLutPreset('mono');
+
+      // 只是不再选中它，素材本身不该丢
+      expect(useAppStore.getState().lutLibrary).toHaveLength(1);
     });
   });
 
-  describe('setCustomLut', () => {
-    it('stores the imported LUT and clears the preset', () => {
+  describe('addCustomLuts', () => {
+    it('stores every imported LUT and clears the preset', () => {
       useAppStore.getState().setLutPreset('mono');
-      useAppStore.getState().setCustomLut({ name: 'look.cube', lut: makeLut() });
+      useAppStore.getState().addCustomLuts([
+        { name: 'a.cube', lut: makeLut() },
+        { name: 'b.cube', lut: makeLut() },
+        { name: 'c.cube', lut: makeLut() },
+      ]);
 
-      expect(useAppStore.getState().customLut?.name).toBe('look.cube');
+      expect(useAppStore.getState().lutLibrary.map((entry) => entry.name)).toEqual([
+        'a.cube',
+        'b.cube',
+        'c.cube',
+      ]);
       expect(useAppStore.getState().lutPresetId).toBeNull();
     });
 
-    it('can be cleared', () => {
-      useAppStore.getState().setCustomLut({ name: 'look.cube', lut: makeLut() });
-      useAppStore.getState().setCustomLut(null);
-      expect(useAppStore.getState().customLut).toBeNull();
+    it('selects the first one when nothing is selected yet', () => {
+      useAppStore.getState().addCustomLuts([
+        { name: 'a.cube', lut: makeLut() },
+        { name: 'b.cube', lut: makeLut() },
+      ]);
+
+      expect(selectCustomLut(useAppStore.getState())?.name).toBe('a.cube');
+    });
+
+    it('replaces a same-named LUT instead of adding a duplicate', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'a.cube', lut: makeLut() }]);
+      const key = useAppStore.getState().customLutKey;
+
+      useAppStore.getState().addCustomLuts([{ name: 'a.cube', lut: makeLut() }]);
+
+      expect(useAppStore.getState().lutLibrary).toHaveLength(1);
+      // 同一个名字复用的是同一个键，选择不会跳
+      expect(useAppStore.getState().customLutKey).toBe(key);
+    });
+
+    it('appends a later batch without disturbing the current selection', () => {
+      useAppStore.getState().addCustomLuts([
+        { name: 'a.cube', lut: makeLut() },
+        { name: 'b.cube', lut: makeLut() },
+      ]);
+      const [, second] = useAppStore.getState().lutLibrary;
+      useAppStore.getState().setActiveCustomLut(second.key);
+
+      useAppStore.getState().addCustomLuts([{ name: 'c.cube', lut: makeLut() }]);
+
+      expect(useAppStore.getState().lutLibrary).toHaveLength(3);
+      expect(selectCustomLut(useAppStore.getState())?.name).toBe('b.cube');
+    });
+  });
+
+  describe('setActiveCustomLut', () => {
+    it('switches the active LUT and clears the preset', () => {
+      useAppStore.getState().addCustomLuts([
+        { name: 'a.cube', lut: makeLut() },
+        { name: 'b.cube', lut: makeLut() },
+      ]);
+      const [first, second] = useAppStore.getState().lutLibrary;
+      useAppStore.getState().setLutPreset('mono');
+
+      useAppStore.getState().setActiveCustomLut(second.key);
+
+      expect(selectCustomLut(useAppStore.getState())?.name).toBe('b.cube');
+      expect(useAppStore.getState().lutPresetId).toBeNull();
+
+      useAppStore.getState().setActiveCustomLut(first.key);
+      expect(selectCustomLut(useAppStore.getState())?.name).toBe('a.cube');
+    });
+
+    it('can be set back to none', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'a.cube', lut: makeLut() }]);
+      useAppStore.getState().setActiveCustomLut(null);
+
+      expect(useAppStore.getState().customLutKey).toBeNull();
+      expect(selectActiveLut(useAppStore.getState())).toBeNull();
+    });
+
+    it('ignores a key that is not in the library', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'a.cube', lut: makeLut() }]);
+      const key = useAppStore.getState().customLutKey;
+
+      useAppStore.getState().setActiveCustomLut('nope');
+
+      expect(useAppStore.getState().customLutKey).toBe(key);
+    });
+  });
+
+  describe('removeCustomLut', () => {
+    it('falls back to the first remaining LUT when the selected one is removed', () => {
+      useAppStore.getState().addCustomLuts([
+        { name: 'a.cube', lut: makeLut() },
+        { name: 'b.cube', lut: makeLut() },
+      ]);
+      const [first, second] = useAppStore.getState().lutLibrary;
+      useAppStore.getState().setActiveCustomLut(second.key);
+
+      useAppStore.getState().removeCustomLut(second.key);
+
+      expect(useAppStore.getState().lutLibrary.map((entry) => entry.name)).toEqual(['a.cube']);
+      expect(useAppStore.getState().customLutKey).toBe(first.key);
+    });
+
+    it('falls back to no custom LUT when the library empties', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'a.cube', lut: makeLut() }]);
+      const key = useAppStore.getState().lutLibrary[0].key;
+
+      useAppStore.getState().removeCustomLut(key);
+
+      expect(useAppStore.getState().lutLibrary).toHaveLength(0);
+      expect(useAppStore.getState().customLutKey).toBeNull();
+      // 库里空了且没有预设 → 回到原图
+      expect(selectActiveLut(useAppStore.getState())).toBeNull();
+      expect(selectHasLut(useAppStore.getState())).toBe(false);
+    });
+
+    it('does not resurrect the preset that the custom LUT had displaced', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'a.cube', lut: makeLut() }]);
+      const key = useAppStore.getState().lutLibrary[0].key;
+      useAppStore.getState().setLutPreset('mono');
+      useAppStore.getState().setActiveCustomLut(key);
+
+      useAppStore.getState().removeCustomLut(key);
+
+      // 选自定义 LUT 时预设就清了；这是两个互斥的选择，不该在删除后自己回来
+      expect(useAppStore.getState().lutPresetId).toBeNull();
+      expect(selectActiveLut(useAppStore.getState())).toBeNull();
+    });
+
+    it('keeps the current selection when another one is removed', () => {
+      useAppStore.getState().addCustomLuts([
+        { name: 'a.cube', lut: makeLut() },
+        { name: 'b.cube', lut: makeLut() },
+      ]);
+      const [first, second] = useAppStore.getState().lutLibrary;
+      useAppStore.getState().setActiveCustomLut(second.key);
+
+      useAppStore.getState().removeCustomLut(first.key);
+
+      expect(useAppStore.getState().customLutKey).toBe(second.key);
+    });
+
+    it('ignores an unknown key', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'a.cube', lut: makeLut() }]);
+
+      useAppStore.getState().removeCustomLut('nope');
+
+      expect(useAppStore.getState().lutLibrary).toHaveLength(1);
     });
   });
 
@@ -198,10 +342,23 @@ describe('useAppStore', () => {
       expect(selectActiveLut(useAppStore.getState())?.title).toBe('黑白');
     });
 
-    it('prefers the imported LUT', () => {
+    it('prefers the selected imported LUT', () => {
       const custom = makeLut();
-      useAppStore.getState().setCustomLut({ name: 'custom', lut: custom });
+      useAppStore.getState().addCustomLuts([{ name: 'custom', lut: custom }]);
       expect(selectActiveLut(useAppStore.getState())).toBe(custom);
+    });
+
+    it('falls back to the preset when the selected key is gone from the library', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'a.cube', lut: makeLut() }]);
+      const key = useAppStore.getState().lutLibrary[0].key;
+      // 手工造出「选了自定义 LUT，同时预设也没被清」的异常状态：
+      // 正常流程里 setActiveCustomLut 会清掉预设，这里只验选择器本身的兜底
+      useAppStore.setState({ customLutKey: key, lutPresetId: 'mono' });
+
+      // 直接改库、不经过 remove
+      useAppStore.setState({ lutLibrary: [] });
+
+      expect(selectActiveLut(useAppStore.getState())?.title).toBe('黑白');
     });
   });
 
@@ -257,17 +414,37 @@ describe('useAppStore', () => {
   });
 
   describe('selectHasLut', () => {
-    it('预设与载入的 LUT 都算有', () => {
+    it('预设与选中的载入 LUT 都算有', () => {
       expect(selectHasLut(useAppStore.getState())).toBe(false);
 
       useAppStore.getState().setLutPreset('mono');
       expect(selectHasLut(useAppStore.getState())).toBe(true);
 
-      useAppStore.getState().setCustomLut(null);
       useAppStore.getState().setLutPreset(null);
-      useAppStore.getState().setCustomLut({ name: 'look.cube', lut: makeLut() });
+      useAppStore.getState().addCustomLuts([{ name: 'look.cube', lut: makeLut() }]);
       expect(selectHasLut(useAppStore.getState())).toBe(true);
     });
+
+    it('库里导入了但没选中时不算有', () => {
+      useAppStore.getState().addCustomLuts([{ name: 'look.cube', lut: makeLut() }]);
+      useAppStore.getState().setActiveCustomLut(null);
+
+      expect(useAppStore.getState().lutLibrary).toHaveLength(1);
+      expect(selectHasLut(useAppStore.getState())).toBe(false);
+    });
+  });
+
+  it('换文件夹时清掉 LUT 选择，但保留已导入的库', () => {
+    useAppStore.getState().addCustomLuts([
+      { name: 'a.cube', lut: makeLut() },
+      { name: 'b.cube', lut: makeLut() },
+    ]);
+
+    useAppStore.getState().setFolder(makeBrowseResult(['a.cr2']));
+
+    expect(useAppStore.getState().customLutKey).toBeNull();
+    expect(useAppStore.getState().lutPresetId).toBeNull();
+    expect(useAppStore.getState().lutLibrary).toHaveLength(2);
   });
 
   it('resets only the numeric adjustments, leaving the LUT choice alone', () => {

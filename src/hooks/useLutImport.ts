@@ -1,31 +1,51 @@
 import { useCallback } from 'react';
 import { parse3dlLut } from '../lut/parse-3dl';
 import { parseCubeLut } from '../lut/parse-cube';
-import { useAppStore } from '../store/useAppStore';
+import { useAppStore, type LoadedLut } from '../store/useAppStore';
 
-/** 按扩展名挑解析器并载入 LUT */
+/** 一次导入的结果：成功入列的条数与逐个文件的失败原因 */
+export interface LutImportResult {
+  added: number;
+  failures: Array<{ fileName: string; message: string }>;
+}
+
+/** 按扩展名挑解析器 */
+function parseLutFile(name: string, content: string) {
+  return /\.3dl$/i.test(name) ? parse3dlLut(content) : parseCubeLut(content);
+}
+
+/**
+ * 一次导入多个 LUT 文件。
+ *
+ * 逐个解析：某个文件坏了不影响其他文件入列，失败原因按文件汇总返回。
+ * 这里**不走 setError**——那会把 status 打成 `error` 并盖掉整个界面，而一两个
+ * 坏文件不该让用户看不到正在看的图。失败提示由调用方就地展示。
+ */
 export function useLutImport() {
-  const setCustomLut = useAppStore((state) => state.setCustomLut);
-  const setError = useAppStore((state) => state.setError);
+  const addCustomLuts = useAppStore((state) => state.addCustomLuts);
 
-  const importLutFile = useCallback(
-    async (file: File): Promise<boolean> => {
-      try {
-        const content = await file.text();
-        const parsed = /\.3dl$/i.test(file.name) ? parse3dlLut(content) : parseCubeLut(content);
+  const importLutFiles = useCallback(
+    async (files: File[]): Promise<LutImportResult> => {
+      const parsed: Array<Omit<LoadedLut, 'key'>> = [];
+      const failures: LutImportResult['failures'] = [];
 
-        setCustomLut({
-          name: parsed.title?.trim() || file.name,
-          lut: { size: parsed.size, data: parsed.data, title: parsed.title },
-        });
-        return true;
-      } catch (error) {
-        setError(`无法载入 LUT「${file.name}」：${(error as Error).message}`);
-        return false;
+      for (const file of files) {
+        try {
+          const lut = parseLutFile(file.name, await file.text());
+          parsed.push({
+            name: lut.title?.trim() || file.name,
+            lut: { size: lut.size, data: lut.data, title: lut.title },
+          });
+        } catch (error) {
+          failures.push({ fileName: file.name, message: (error as Error).message });
+        }
       }
+
+      if (parsed.length > 0) addCustomLuts(parsed);
+      return { added: parsed.length, failures };
     },
-    [setCustomLut, setError],
+    [addCustomLuts],
   );
 
-  return { importLutFile };
+  return { importLutFiles };
 }

@@ -11,7 +11,7 @@ import {
   formatIso,
   formatShutter,
 } from '../services/raw-format';
-import { selectCurrentImage, useAppStore } from '../store/useAppStore';
+import { selectCurrentImage, selectCustomLut, useAppStore } from '../store/useAppStore';
 import { ExportPanel } from './ExportPanel';
 import { LogPanel } from './LogPanel';
 import { LutPanel } from './LutPanel';
@@ -50,7 +50,7 @@ export function RightPanel({ image, loading = false }: RightPanelProps) {
   const setAdjustment = useAppStore((state) => state.setAdjustment);
   const resetAdjustments = useAppStore((state) => state.resetAdjustments);
   const lutPresetId = useAppStore((state) => state.lutPresetId);
-  const customLut = useAppStore((state) => state.customLut);
+  const hasCustomLut = useAppStore((state) => selectCustomLut(state) !== null);
   const setLutPreset = useAppStore((state) => state.setLutPreset);
 
   const hasImage = entry !== null;
@@ -94,7 +94,7 @@ export function RightPanel({ image, loading = false }: RightPanelProps) {
             type="button"
             className="button button--tiny"
             onClick={() => setLutPreset(null)}
-            disabled={!lutPresetId && !customLut}
+            disabled={!lutPresetId && !hasCustomLut}
           >
             移除
           </button>

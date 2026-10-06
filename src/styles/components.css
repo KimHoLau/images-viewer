@@ -290,11 +290,43 @@
 .lut-import {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
 }
 
-.lut-import__name {
+.lut-import__hint {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.lut-import__errors {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: var(--danger);
+  font-size: 11px;
+}
+
+/* 已载入的 LUT 库：下拉框切换当前生效的那一个 */
+.lut-library {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.lut-library .field {
+  padding-top: 0;
+}
+
+.lut-library__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.lut-library__name {
   color: var(--text-dim);
   font-size: 11px;
   overflow: hidden;
@@ -311,6 +343,11 @@
 .log-panel__notice {
   margin-top: 6px;
   color: var(--accent);
+}
+
+/* 漏选色彩空间时的警告：语义比「提示」重，用警示色而不是强调色 */
+.log-panel__notice--warning {
+  color: var(--warning);
 }
 
 /* ---------- 导出 ---------- */

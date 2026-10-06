@@ -19,6 +19,21 @@ LUT_3D_SIZE 2
 1 1 1
 `;
 
+/** 2×2×2 的占位 LUT，直接塞进库里用，省掉一次解析 */
+function makeLut() {
+  return { size: 2, data: new Float32Array(24), title: '占位' };
+}
+
+/** 文件输入；面板里只有这一个 */
+function fileInput(): HTMLInputElement {
+  return document.querySelector<HTMLInputElement>('input[type="file"]')!;
+}
+
+/** 已载入 LUT 的下拉框；库为空时不存在 */
+function librarySelect(): HTMLSelectElement | null {
+  return screen.queryByRole('combobox', { name: '已载入的 LUT' }) as HTMLSelectElement | null;
+}
+
 describe('LutPanel', () => {
   beforeEach(() => {
     useAppStore.setState(initialState, true);
@@ -68,54 +83,141 @@ describe('LutPanel', () => {
   });
 
   describe('载入 LUT 文件', () => {
-    it('parses a .cube file into the store', async () => {
+    it('parses a .cube file into the library', async () => {
       render(<LutPanel />);
 
-      const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
-      const file = new File([CUBE_FILE], 'look.cube');
-      fireEvent.change(input, { target: { files: [file] } });
+      fireEvent.change(fileInput(), { target: { files: [new File([CUBE_FILE], 'look.cube')] } });
 
       await waitFor(() => {
-        expect(useAppStore.getState().customLut).not.toBeNull();
+        expect(useAppStore.getState().lutLibrary).toHaveLength(1);
       });
 
-      const custom = useAppStore.getState().customLut!;
-      expect(custom.name).toBe('Imported Look');
-      expect(custom.lut.size).toBe(2);
+      const entry = useAppStore.getState().lutLibrary[0];
+      expect(entry.name).toBe('Imported Look');
+      expect(entry.lut.size).toBe(2);
     });
 
-    it('shows the imported LUT name', async () => {
-      useAppStore.getState().setCustomLut({
-        name: '我的预设',
-        lut: { size: 2, data: new Float32Array(24) },
+    it('accepts multiple files and keeps every one of them', async () => {
+      render(<LutPanel />);
+
+      fireEvent.change(fileInput(), {
+        target: {
+          files: [
+            new File([CUBE_FILE], 'a.cube'),
+            new File([CUBE_FILE.replace('Imported Look', 'Second Look')], 'b.cube'),
+            new File([CUBE_FILE.replace('Imported Look', 'Third Look')], 'c.cube'),
+          ],
+        },
       });
 
+      await waitFor(() => {
+        expect(useAppStore.getState().lutLibrary).toHaveLength(3);
+      });
+
+      expect(useAppStore.getState().lutLibrary.map((entry) => entry.name)).toEqual([
+        'Imported Look',
+        'Second Look',
+        'Third Look',
+      ]);
+      // 导入后自动选中第一个，画面立刻有变化
+      expect(useAppStore.getState().customLutKey).toBe(
+        useAppStore.getState().lutLibrary[0].key,
+      );
+    });
+
+    it('keeps the good files when one of them is broken', async () => {
       render(<LutPanel />);
-      expect(screen.getByText('我的预设')).toBeInTheDocument();
+
+      fireEvent.change(fileInput(), {
+        target: {
+          files: [new File([CUBE_FILE], 'good.cube'), new File(['不是 LUT'], 'broken.cube')],
+        },
+      });
+
+      await waitFor(() => {
+        expect(useAppStore.getState().lutLibrary).toHaveLength(1);
+      });
+
+      // 坏文件就地提示，且不把整个界面打成 error 状态
+      expect(await screen.findByText(/broken\.cube/)).toBeInTheDocument();
+      expect(useAppStore.getState().status).not.toBe('error');
+    });
+
+    it('lists every imported LUT in the dropdown and switches between them', async () => {
+      render(<LutPanel />);
+
+      fireEvent.change(fileInput(), {
+        target: {
+          files: [
+            new File([CUBE_FILE], 'a.cube'),
+            new File([CUBE_FILE.replace('Imported Look', 'Second Look')], 'b.cube'),
+          ],
+        },
+      });
+
+      await waitFor(() => {
+        expect(librarySelect()).not.toBeNull();
+      });
+
+      const options = Array.from(librarySelect()!.options).map((option) => option.textContent);
+      expect(options).toEqual(['不使用', 'Imported Look', 'Second Look']);
+
+      const [first, second] = useAppStore.getState().lutLibrary;
+      expect(librarySelect()!.value).toBe(first.key);
+
+      fireEvent.change(librarySelect()!, { target: { value: second.key } });
+
+      expect(useAppStore.getState().customLutKey).toBe(second.key);
+      // 名字同时出现在下拉选项与下面的当前项里
+      expect(screen.getAllByText('Second Look').length).toBeGreaterThan(0);
+    });
+
+    it('removes the selected LUT and falls back to the next one', async () => {
+      render(<LutPanel />);
+
+      fireEvent.change(fileInput(), {
+        target: {
+          files: [
+            new File([CUBE_FILE], 'a.cube'),
+            new File([CUBE_FILE.replace('Imported Look', 'Second Look')], 'b.cube'),
+          ],
+        },
+      });
+
+      await waitFor(() => {
+        expect(useAppStore.getState().lutLibrary).toHaveLength(2);
+      });
+
+      fireEvent.click(screen.getByText('移除'));
+
+      await waitFor(() => {
+        expect(useAppStore.getState().lutLibrary).toHaveLength(1);
+      });
+      expect(useAppStore.getState().lutLibrary[0].name).toBe('Second Look');
+      expect(useAppStore.getState().customLutKey).toBe(useAppStore.getState().lutLibrary[0].key);
+    });
+
+    it('hides the dropdown again once the library is empty', async () => {
+      useAppStore.getState().addCustomLuts([{ name: 'only', lut: makeLut() }]);
+
+      render(<LutPanel />);
+      fireEvent.click(screen.getByText('移除'));
+
+      await waitFor(() => {
+        expect(librarySelect()).toBeNull();
+      });
+      expect(useAppStore.getState().customLutKey).toBeNull();
     });
 
     it('falls back to the file name when the LUT has no title', async () => {
       const untitled = CUBE_FILE.replace(/TITLE ".*"\n/, '');
       render(<LutPanel />);
 
-      const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
-      fireEvent.change(input, { target: { files: [new File([untitled], 'no-title.cube')] } });
+      fireEvent.change(fileInput(), { target: { files: [new File([untitled], 'no-title.cube')] } });
 
       await waitFor(() => {
-        expect(useAppStore.getState().customLut?.name).toBe('no-title.cube');
+        expect(useAppStore.getState().lutLibrary[0]?.name).toBe('no-title.cube');
       });
-    });
-
-    it('reports a parse error without changing the LUT', async () => {
-      render(<LutPanel />);
-
-      const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
-      fireEvent.change(input, { target: { files: [new File(['不是 LUT'], 'broken.cube')] } });
-
-      await waitFor(() => {
-        expect(useAppStore.getState().error).toContain('无法载入 LUT');
-      });
-      expect(useAppStore.getState().customLut).toBeNull();
     });
 
     it('dispatches .3dl files to the 3dl parser', async () => {
@@ -124,11 +226,10 @@ describe('LutPanel', () => {
       const content = `3DMESH\nMesh 1 1\n3\n${entries.join('\n')}`;
 
       render(<LutPanel />);
-      const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
-      fireEvent.change(input, { target: { files: [new File([content], 'look.3dl')] } });
+      fireEvent.change(fileInput(), { target: { files: [new File([content], 'look.3dl')] } });
 
       await waitFor(() => {
-        expect(useAppStore.getState().customLut?.lut.size).toBe(3);
+        expect(useAppStore.getState().lutLibrary[0]?.lut.size).toBe(3);
       });
     });
   });
