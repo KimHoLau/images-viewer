@@ -207,4 +207,5 @@ jsdom 里 522 项全绿、只有这里跑才现形。最终写法是「`near = m
 然后发布到 GitHub Pages。构建时 `GITHUB_ACTIONS` 环境变量会让 Vite 把资源路径前缀设成
 `/images-viewer/`（项目页路径），本地构建仍是根路径。
 
-首次部署需要在仓库设置里把 Pages 的 Source 选成 **GitHub Actions**。
+Pages 已启用（Source = **GitHub Actions**，`build_type: workflow`），推 `main` 即发布到
+<https://kimholau.github.io/images-viewer/>。
