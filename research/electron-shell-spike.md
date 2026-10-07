@@ -173,7 +173,7 @@ node ../../node_modules/vite/bin/vite.js build --config vite.spike.config.ts
 | --- | --- |
 | `spike/electron-shell/out/browser.json` | 浏览器基线完整证据（16 通过 / 0 需适配 / 2 人工），含每项的 metrics 与原始 evidence |
 | `spike/electron-shell/out/browser-dom.html` | 同一次运行的面板 DOM 快照（人读用） |
-| `spike/electron-shell/out/selftest*.json` | 壳内自测结果（**待真机补**，本机没有） |
+| `spike/electron-shell/out/selftest.json` | 壳内自测结果（**已补跑**：16 通过 / 0 需适配 / 2 人工 / 3 未跑）。`selftest-nogpu.json` 没拿到（变体挂住不出结果），`selftest-base-relative.json` = 15 通过 / 1 失败 |
 | `spike/electron-shell/main.cjs` | 最小壳：`app://` + privileges + 请求流水 + 结果回写 |
 | `spike/electron-shell/vite.spike.config.ts` | 探针入口的构建配置（与真构建的差异见 A6） |
 | `spike/electron-shell/serve.cjs` | 浏览器基线的静态服务器（含 `?ce=gzip` 陷阱与结果收集口） |

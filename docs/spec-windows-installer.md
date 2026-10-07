@@ -76,7 +76,7 @@
 
 ### 2.4 依赖的浏览器能力与证据等级
 
-下表全部是**壳内实测**（Electron 44.6.0 / Chromium 152 / Windows，`app://bundle`，2026-10-07）。原始证据：`spike/_issue41/spike/electron-shell/out/selftest.json`（与本文档同一张票的产物，在抛弃式分支上）。
+下表全部是**壳内实测**（Electron 44.6.0 / Chromium 152 / Windows，`app://bundle`，2026-10-07）。原始证据：抛弃式分支 `spike/issue-41-electron-shell` 上的 `spike/electron-shell/out/selftest.json`（**main 上不含这个文件**）；判定表与坑清单已回填到 [`research/electron-shell-spike.md`](../research/electron-shell-spike.md)。
 
 | 能力 | 判定 | 实测 |
 | --- | --- | --- |
@@ -132,10 +132,11 @@ export default defineConfig(({ mode }) => {
   "clean:dist": "node scripts/clean-dist.mjs",
   "build": "tsc -b && vite build",
   "build:desktop": "npm run clean:dist && tsc -b && vite build --mode desktop",
-  "pack:win": "npm run build:desktop && electron-builder --win --x64 --publish never",
-  "release:win": "npm run pack:win"
+  "pack:win": "npm run build:desktop && electron-builder --win --x64 --publish never"
 }
 ```
+
+**`npm run lut:pack` 不是桌面打包的前置步骤。** 34 个 `.cube.gz` 是**已提交的构建产物**，CI 与本地都能直接构建。但这条有个必须堵住的洞：[`src/lut/official-luts.ts`](../src/lut/official-luts.ts) 用 `import.meta.glob('/3DLUT/**/*.cube.gz')` 在构建期**静默**扫目录，**缺文件不会报错**，只会安静地少几个 LUT —— 与「34 个全量随包」的承诺直接冲突。所以 `build:desktop` 之后必须断言 `dist/assets/*.gz` **恰好 34 个**（9.1 与 6.1 各有一条）。只有**换了厂商原始 `.cube` 素材**时才手动跑一次 `lut:pack` 并重新提交 `.cube.gz`。
 
 ### 3.3 打包前的硬性顺序
 
@@ -170,7 +171,7 @@ export default defineConfig(({ mode }) => {
 }
 ```
 
-同时 `package.json` 顶层要补：`"main": "electron/main.cjs"`、`"description"`、`"author"`，并把 `"electron": "44.6.0"` 与 `"electron-builder": "^26.17.0"` 放进 devDependencies。
+同时 `package.json` 顶层要补：`"main": "electron/main.cjs"`、`"description"`、`"author"`，并把 `"electron": "44.6.0"` 与 `"electron-builder": "26.17.0"` 放进 devDependencies（**两个都精确钉版本，不带 `^`**）。
 
 逐条理由：
 
@@ -182,14 +183,17 @@ export default defineConfig(({ mode }) => {
 - **不写 `publish` 块**：我们走 `--publish never` + 手动上传，不需要它。
 - **`win.signExecutable: false` 是「只跳过代码签名、保留图标与版本信息」**。注意别误用 `win.signAndEditExecutable: false`——那会**连资源编辑一起关掉**（实测：exe 版本资源退回 Electron 原版的 `44.6.0 / Electron / GitHub, Inc.`，体积与下载面却省不下任何东西）。本项目本来就没有证书，electron-builder 会自动跳过签名；写这一条是为了让构建在「某台机器恰好装了证书」时也确定。
 - **`win.artifactName` 落给 zip**（`nsis.artifactName` 只作用于 NSIS 那一个 target）。
+- **`electron-builder` 也精确钉版本**（`"26.17.0"`，不是 `^`）。5.5.1 的实测数字是用 **26.15.3** 跑出来的，两者同属 v26、选项名一致；换 26.17.0 之后若行为有差异，**以重跑 5.5.1 与 9.1 的结果为准**。**不要升到 v27**：`win.signExecutable` 在 v27 改名 `win.sign`、`asarUnpack` 改名 `asar.unpack`、隐式 publish 被删——三处都会让这份 spec 的配置静默失效。
 - **把 `electron` 加进 devDependencies 之后要确认 `npm ci` 仍然跑得通**：它的 postinstall 会下约 150 MB 的二进制，本仓库 `package.json` 里还有一个 `allowScripts` 白名单（现在只列了 esbuild 与 @swc/core）。打包本身不依赖这个二进制（electron-builder 自己按版本下载发行包），但 `npm ci` 失败会让 CI 红。
 
 
 
+## 4. 资源与离线资产
+
 ### 4.1 `app://` 协议配方（钉死）
 
 ```js
-// electron/main.cjs（要点摘录，不是完整文件）
+// electron/main.cjs —— 这就是完整实现（只把 window-all-closed 留到本节末尾单列）
 const { app, protocol, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -274,7 +278,7 @@ app.on('window-all-closed', () => app.quit());
 
 ### 4.2 48.2 MB 的 LUT 怎么进包
 
-**资产留在 `asar` 里，用 `asar` 默认值（`true`），不设 `asarUnpack`、不用 `extraResources`。**
+**资产留在 `asar` 里**（3.4 里显式写了 `"asar": true`，与默认值一致——写出来只为把意图留在配置里），**不设 `asarUnpack`、不用 `extraResources`。**
 
 依据是官方文档的合取：asar 文档（归档内文件可被 `file:` 协议请求）、`net.fetch` 文档（可发往 `file:`）、以及 `protocol.registerSource` 原文「streamed to the requester the way `file:` URLs are, **including from `asar` archives**」。官方给出「必须解包」的三类理由是：原生 `.node` 模块、需要**随机访问**的大二进制、需要被直接执行的程序文件——本项目一类都不属于（我们是整文件 `fetch` + 顺序 `DecompressionStream`）。
 
@@ -282,7 +286,7 @@ app.on('window-all-closed', () => app.quit());
 
 > **取数路径不得依赖 Range 或分段读。** 现有代码天然满足（整文件 `fetch` + 解压），实现时不要引入。
 
-第 9.3 节把它变成了一条可执行的验收项（装上以后官方 LUT 必须能取到、能解压、能出图）。若那一条失败，退路是 `asarUnpack: ['dist/assets/*.gz']`，**换之前先记录失败现象**。
+第 9.3 节把它变成了一条可执行的验收项（装上以后官方 LUT 必须能取到、能解压、能出图）。**退路的触发判据就是那一条失败**（现象通常是 `.gz` 请求 404，或解压阶段报错）：届时改成 `asarUnpack: ['dist/assets/*.gz']`，并**重跑 9.3 的全部六条**——换了取数路径就该把整条关键路径重验一遍，不要只验 LUT。换之前先把失败现象记下来。
 
 ### 4.3 CSP：v1 不设
 
@@ -300,23 +304,7 @@ app.on('window-all-closed', () => app.quit());
 
 ### 5.1 NSIS 安装版
 
-```json
-"win": {
-  "target": ["nsis", "zip"],
-  "signExecutable": false,
-  "artifactName": "raw-images-studio-${version}-win-x64-portable.${ext}"
-},
-"nsis": {
-  "oneClick": false,
-  "perMachine": false,
-  "allowToChangeInstallationDirectory": true,
-  "createDesktopShortcut": false,
-  "createStartMenuShortcut": true,
-  "deleteAppDataOnUninstall": false,
-  "differentialPackage": false,
-  "artifactName": "raw-images-studio-${version}-win-x64-setup.${ext}"
-}
-```
+**取值以 3.4 的 `win` / `nsis` 两块为唯一真相**（那里是完整的 `build` 字段）。本节只写每一条的**理由**，同一个配置块不在两处各写一遍。
 
 - **per-user**（`perMachine: false`）：装到 `%LOCALAPPDATA%\Programs\raw-images-studio`，**不需要管理员权限**。不做签名时，少一次 UAC 提权就少一层「这软件为什么跟我要管理员权限」的疑虑。
 - `oneClick: false` 是**必须**的：`allowToChangeInstallationDirectory` 在 `oneClick: true` 下会让构建直接**报错**（`InvalidConfigurationError`），而且只有向导模式才有「改安装目录」这一步。
@@ -327,7 +315,9 @@ app.on('window-all-closed', () => app.quit());
 
 ### 5.2 便携 zip
 
-`win.target: ["nsis", "zip"]`，产物名 `raw-images-studio-${version}-win-x64-portable.zip`（`win.artifactName`，因为 `nsis.artifactName` 只作用于 NSIS 那一个 target）。
+`win.target: ["nsis", "zip"]`，产物名 `raw-images-studio-${version}-win-x64-portable.zip`。名字来自 `win.artifactName`：electron-builder 的解析顺序是 **target 专属 > 平台 > 顶层**，`nsis.artifactName` 只作用于 NSIS 那一个 target，zip 落到 `win.artifactName` 上——这是文档化的机制，不是巧合。
+
+**两个 target 共用同一份 `files` 清单**（3.4 里只写了一份），所以便携 zip 里的资源与安装版逐字节相同，34 个 `.cube.gz` 在两边都齐。
 
 **为什么不是 `portable` 单文件 exe**：`portable` 是 NSIS 变体，每次启动都要自解压到 `$TEMP` 下的一个 per-build 目录，退出时再清理——启动慢、吃盘，而且它的 `userData` 与安装版同址（官方机制里没有「绿色版」开关）。`zip` 解压即用，行为与安装版一致。
 
@@ -369,7 +359,7 @@ app.on('window-all-closed', () => app.quit());
 
 #### 5.5.1 实测数字
 
-实测环境：electron-builder **26.15.3** + Electron **44.6.0**（`electronDist` 指向本地解包发行包，未重复下载），`ELECTRON_BUILDER_CACHE` 指向工作区内。构建耗时：冷缓存 **212.8 s** / 暖缓存 **97.9 s**。
+实测环境：electron-builder **26.15.3**（spec 钉的是 26.17.0，见 3.4）+ Electron **44.6.0**（`electronDist` 指向本地解包发行包，未重复下载），`ELECTRON_BUILDER_CACHE` 指向工作区内。构建耗时：冷缓存 **212.8 s** / 暖缓存 **97.9 s**。
 
 | 产物 | 字节数 | MiB | 说明 |
 | --- | --- | --- | --- |
@@ -429,6 +419,16 @@ jobs:
           node-version: 22
           cache: npm
 
+      # 必须在 npm ci 之前：electron 的 postinstall 与 electron-builder 的 @electron/get
+      # 都会往这两个目录落发行包，缓存恢复晚一步就等于没有缓存。
+      - name: 缓存 Electron 发行包与 electron-builder 工具链
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/eb-cache
+            ${{ env.LOCALAPPDATA }}/electron/Cache
+          key: eb-win-${{ hashFiles('package-lock.json') }}
+
       - run: npm ci
 
       - name: 校验 tag 与 package.json 一致
@@ -445,18 +445,24 @@ jobs:
 
       - run: npm run build:desktop
 
-      - name: 缓存 Electron 与 electron-builder 工具链
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ runner.temp }}/eb-cache
-            ${{ env.LOCALAPPDATA }}/electron/Cache
-          key: eb-win-${{ hashFiles('package-lock.json') }}
-
+      # 直接调 electron-builder，不走 pack:win：build:desktop 上面已经跑过，
+      # pack:win 会把 clean + vite build 再来一遍（electron-builder 自己不会构建前端）。
       - name: 出 NSIS 安装包 + 便携 zip
         run: npx electron-builder --win --x64 --publish never
         env:
           ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/eb-cache
+
+      # 「NSIS 只出了 zip」必须在这里红掉，而不是绿着建出一个缺安装包的 draft。
+      - name: 断言两个产物都在
+        shell: pwsh
+        run: |
+          $missing = @()
+          if (-not (Get-ChildItem release -Filter '*-setup.exe')) { $missing += 'setup.exe' }
+          if (-not (Get-ChildItem release -Filter '*-portable.zip')) { $missing += 'portable.zip' }
+          Get-ChildItem release -File | Select-Object Name, Length
+          if ($missing.Count) { Write-Error "产物缺失：$($missing -join ', ')"; exit 1 }
+          $gz = @(Get-ChildItem dist\assets -Filter '*.gz').Count
+          if ($gz -ne 34) { Write-Error "dist/assets 下的 .gz 是 $gz 个，应为 34 个（见 3.2）"; exit 1 }
 
       - name: 生成校验和
         shell: pwsh
@@ -475,9 +481,13 @@ jobs:
           $tag = if ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
           $assets = @(Get-ChildItem release -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object { $_.FullName })
           $assets += 'release/SHA256SUMS.txt'
+          # 模板里的 <version> 在这里替换掉（tag 去掉前导 v），不留给人工
+          $version = $tag -replace '^v', ''
+          (Get-Content .github/release-notes-template.md -Raw) -replace '<version>', $version |
+            Set-Content release/release-notes.md -Encoding utf8
           gh release view $tag --json isDraft 2>$null | Out-Null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --draft --title $tag --notes-file .github/release-notes-template.md --verify-tag
+            gh release create $tag --draft --title $tag --notes-file release/release-notes.md --verify-tag
           }
           gh release upload $tag @assets --clobber
 ```
@@ -489,13 +499,13 @@ jobs:
 - 若改用 `softprops/action-gh-release`：它的 `overwrite_files` 默认 `true`，但**复用一个已存在的 draft 时必须显式写 `draft: true`**，否则它会在上传后把 draft 直接发布出去。
 - `--publish always` 之所以不用，还有一条：它有两类「workflow 绿了但没上传」的静默情况（Release 已发布超过 2 小时；已存在非 draft 而本次要建 draft）。用 `--publish never` + 显式上传就没有这个盲区。
 - **上传前必须跑 `typecheck` + `lint` + `test`**，任一失败就不出包。tag 推出去 Release 就是公开的。
-- **缓存的价值主要在 Electron 发行包上**（约 150 MB）：electron-builder 那三个工具包实测合计只有 2.5 MB，而 `winCodeSign` 在不签名时根本不会被下载，所以不必为它留缓存。
+- **缓存的价值主要在 Electron 发行包上**（约 150 MB）：electron-builder 那三个工具包实测合计只有 2.5 MB，而 `winCodeSign` 在不签名时根本不会被下载，所以不必为它留缓存。**缓存步骤因此放在 `npm ci` 之前**（见上面 YAML 的位置）。另注意 5.5.1 的实测是本机用 `electronDist` 指向已解包的发行包跑出来的，**CI 里没有 `electronDist`**，会真的下载一次——这正是缓存存在的理由。
 
 ### 6.2 触发与重跑
 
 - `on.push.tags: ['v*']` + `workflow_dispatch`（输入一个已存在的 tag 名，checkout 该 tag 重出包）。
 - `concurrency` 防重入，`cancel-in-progress: false`（出包跑到一半被取消只会留下半套资产）。
-- 重跑安全：Release 已存在时跳过创建、直接 `--clobber` 覆盖上传；**资产的正确性以 `SHA256SUMS.txt` 的时间戳为准**，发版手册里写「先确认 Release 上资产的时间戳是本次构建的」。
+- 重跑安全：Release 已存在时跳过创建、直接 `--clobber` 覆盖上传。**发布前人工核对 `SHA256SUMS.txt` 的内容与 Release 上两个产物一致**——时间戳只能说明「传过」，内容一致才说明真对上了；而且 `--clobber` 是先删后传，中途失败会留下一个缺资产的 Release，那种情况要**重跑整个 job**，不要手工补传。
 
 ### 6.3 与 `deploy.yml` 的关系
 
@@ -512,7 +522,7 @@ jobs:
 
 ### 7.2 Release 正文模板
 
-`.github/release-notes-template.md` 用固定结构（实现时逐字照抄，占位符由 CI 之外人工确认）：
+`.github/release-notes-template.md` 用固定结构（实现时逐字照抄）。里面的 `<version>` 由 CI 用「tag 去掉前导 `v`」替换（见 6.1 的 `gh release` 那一步），**不要留给人手改**；其余内容在 draft 上人工看一眼。
 
 ```markdown
 ## raw-images-studio <version>（Windows x64）
@@ -574,14 +584,16 @@ README 只加**一小节**（不塞长教程），放在 `## 部署` 之前：
 
 ## 9. 验收清单
 
-### 9.1 构建产物（本地或 CI）
+### 9.1 构建产物（CI，或任何能执行 NSIS 安装器的 Windows 机器）
+
+> 「本地」不够：这台机器执行不了 NSIS 安装器，`setup.exe` 在这里**必然**产不出来（见 5.5.1）。所以下面涉及 `pack:win` 与 `setup.exe` 的两条，要在 CI 或普通 Windows 主机上过。
 
 - [ ] `npm run build:desktop` 成功，且 `dist/` 里**只有本次**的产物（`clean:dist` 生效）。
+- [ ] `dist/assets/*.gz` 恰好 **34 个**。`lut:pack` 不是打包前置（见 3.2），而清单是构建期静默扫出来的——**少一个文件不会报错，只会安静地少几个 LUT**，所以这条必须当成检查项。
 - [ ] `npm run pack:win` 产出 `release/` 下的 `...-setup.exe` 与 `...-portable.zip`，文件名与 5.3 逐字一致（无空格、纯 ASCII）。
-- [ ] **`...-setup.exe` 真的产出了。** 本环境里 NSIS 安装器执行不了，这一步**没有在这里验过**（见 5.5.1）——第一次 CI/真机跑必须确认它出来。
+- [ ] **`...-setup.exe` 真的产出了。** 本环境里 NSIS 安装器执行不了，这一步**没有在这里验过**（见 5.5.1）——第一次 CI/真机跑必须确认它出来。CI 里已有一条断言专门盯这件事（6.1）。
 - [ ] 两个产物的体积记录在案（5.5.1），与软目标 250 MB 的差距有解释。
 - [ ] `release/` 里没有把打包器自己的中间产物扫进包里（`directories.output` 不是 `dist`）。
-- [ ] NSIS 安装包体积记录在案（5.5.1），与软目标 250 MB 的差距有解释。
 
 ### 9.2 干净 Win10/11 机器上安装
 
@@ -604,6 +616,7 @@ README 只加**一小节**（不塞长教程），放在 `## 部署` 之前：
 
 ### 9.4 卸载
 
+- [ ] **先确认 `deleteAppDataOnUninstall: false` 在向导模式（`oneClick: false`）下真的生效**：这个选项的语义在 electron-builder 的文档与源码之间有过不一致（见 [`research/electron-builder-release-facts.md`](../research/electron-builder-release-facts.md) 的空白清单），别只信配置。
 - [ ] 控制面板卸载：程序目录、开始菜单项、注册表卸载项**全部消失**。
 - [ ] `%APPDATA%\raw-images-studio` **仍在**（这是有意的）。
 - [ ] 按 README 写的手动清理路径删掉它之后，重新安装能正常启动。
@@ -618,7 +631,7 @@ README 只加**一小节**（不塞长教程），放在 `## 部署` 之前：
 | 导出落盘的真实位置与中文文件名有没有乱码 | 探针只证明了「下载被触发、文件名正确」 | 触发已验，落盘未验 |
 | 无 GPU / 远程桌面的真机表现 | 本机 `--spike-no-gpu` 变体跑挂；网页版基线在 SwiftShader 下 WebGL2 + 浮点纹理全通 | 间接证据成立，真机未验 |
 | 真机断网首次启动 | 两条旁证见 4.4 | 旁证成立，人眼未验 |
-| 便携 zip 解压后启动、以及它的用户数据确实落在 `%APPDATA%` | 需要真机跑 | 未验（只按官方机制推断） |
+| 便携 zip 解压后启动、它的用户数据确实落在 `%APPDATA%`、以及它的 `app.asar` 里 34 个 `.cube.gz` 齐全 | 需要真机跑 | 未验（只按官方机制与「两 target 共用一份 `files` 清单」推断，见 5.2） |
 | **NSIS 安装包的产出与安装** | electron-builder 生成卸载器那一步要**真跑一次安装器**，本环境跑不起来（退出码 2，已用手写 `.nsi` 隔离复现） | `setup.exe` 未产出；CI/真机第一轮必须确认（见 9.1） |
 
 ## 10. 证据索引
@@ -629,4 +642,4 @@ README 只加**一小节**（不塞长教程），放在 `## 部署` 之前：
 | [`research/electron-shell-spike.md`](../research/electron-shell-spike.md) | 壳内关键路径的判定表、要适配的配方、坑清单（含本文 2.4 的原始数字） |
 | [`research/electron-builder-release-facts.md`](../research/electron-builder-release-facts.md) | NSIS/asar/便携/版本号/不签名/CI 的一手取证，含本文 4.1 与第 6 节的配置出处 |
 | [`research/desktop-shell-facts.md`](../research/desktop-shell-facts.md) | Electron vs Tauri 的候选事实（选型阶段的证据） |
-| `spike/_issue41/spike/electron-shell/out/selftest.json` | 壳内 21 项自测的原始证据（抛弃式分支） |
+| 分支 `spike/issue-41-electron-shell` 上的 `spike/electron-shell/out/selftest.json` | 壳内 21 项自测的原始证据。**main 上不含它**（探针整体活在抛弃式分支上）；要看得用 `git show origin/spike/issue-41-electron-shell:spike/electron-shell/out/selftest.json` |
