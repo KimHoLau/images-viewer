@@ -244,47 +244,19 @@
 
 /* ---------- LUT 预设 ---------- */
 
-.lut-list {
+/* 官方 LUT：清单随色彩空间换，用一个下拉切换 */
+.lut-presets {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 
-.lut-item {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 5px 8px;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  background: var(--bg-elevated);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
+.lut-presets .field {
+  padding-top: 0;
 }
 
-.lut-item:hover {
-  background: var(--bg-hover);
-}
-
-.lut-item--active {
-  border-color: var(--accent);
-  background: rgba(74, 158, 255, 0.12);
-}
-
-.lut-item__name {
-  font-weight: 600;
-}
-
-.lut-item--active .lut-item__name {
-  color: var(--accent);
-}
-
-.lut-item__desc {
-  color: var(--text-faint);
-  font-size: 11px;
+.lut-presets__error {
+  color: var(--danger);
 }
 
 .lut-import {

@@ -1,7 +1,7 @@
 import { act, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LOG_SPACES, logSpaceIndex } from '../color/log-spaces';
-import { PRESET_LUT_SIZE } from '../lut/types';
+import { FIXTURE_LUT_SIZE, grayscaleLut, splitToneLut } from '../test/lut-fixtures';
 import type { LoadedImage } from '../services/image-loader';
 import { DEFAULT_ADJUSTMENTS } from '../types/adjustments';
 import { useAppStore } from '../store/useAppStore';
@@ -274,41 +274,45 @@ describe('ImageCanvas', () => {
       expect(lastRenderer().setLut).toHaveBeenCalledWith(null);
     });
 
-    it('loads the built-in preset LUT when one is selected', () => {
+    it('applies the official LUT once it lands in the store', () => {
       act(() => {
-        useAppStore.getState().setLutPreset('mono');
+        useAppStore.setState({ officialLutKey: 'fixture', officialLut: grayscaleLut });
       });
 
       render(<ImageCanvas image={null} />);
 
       const passed = lastRenderer().setLut.mock.calls[0][0];
       expect(passed).not.toBeNull();
-      expect(passed.size).toBe(PRESET_LUT_SIZE);
+      expect(passed.size).toBe(FIXTURE_LUT_SIZE);
     });
 
-    it('swaps the LUT when the preset changes', () => {
+    it('swaps the LUT when another official LUT finishes loading', () => {
+      act(() => {
+        useAppStore.setState({ officialLutKey: 'a', officialLut: grayscaleLut });
+      });
+
       render(<ImageCanvas image={null} />);
       lastRenderer().setLut.mockClear();
 
       act(() => {
-        useAppStore.getState().setLutPreset('vivid');
+        useAppStore.setState({ officialLutKey: 'b', officialLut: splitToneLut });
       });
 
       expect(lastRenderer().setLut).toHaveBeenCalledTimes(1);
-      expect(lastRenderer().setLut.mock.calls[0][0].size).toBe(PRESET_LUT_SIZE);
+      expect(lastRenderer().setLut.mock.calls[0][0].title).toBe('夹具：青橙');
       expect(lastRenderer().render).toHaveBeenCalled();
     });
 
-    it('clears the LUT when the preset is removed', () => {
+    it('clears the LUT when the selection goes away', () => {
       act(() => {
-        useAppStore.getState().setLutPreset('mono');
+        useAppStore.setState({ officialLutKey: 'a', officialLut: grayscaleLut });
       });
 
       render(<ImageCanvas image={null} />);
       lastRenderer().setLut.mockClear();
 
       act(() => {
-        useAppStore.getState().setLutPreset(null);
+        useAppStore.getState().clearActiveLut();
       });
 
       expect(lastRenderer().setLut).toHaveBeenCalledWith(null);
@@ -322,7 +326,7 @@ describe('ImageCanvas', () => {
       });
 
       act(() => {
-        useAppStore.getState().setLutPreset('high-contrast');
+        useAppStore.setState({ officialLutKey: 'a', officialLut: grayscaleLut });
       });
 
       // 第一次调用抛错后应再调一次 setLut(null) 兜底

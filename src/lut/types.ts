@@ -19,9 +19,6 @@ export interface Lut3D {
 /** 采样函数：输入输出都是 sRGB 空间的 [0, 1] */
 export type LutSampler = (rgb: Rgb) => Rgb;
 
-/** 内置预设 LUT 的格点数；33³ 足以表达平滑的胶片曲线 */
-export const PRESET_LUT_SIZE = 33;
-
 /** 从 3D LUT 取某个格点的颜色 */
 export function lutEntryAt(lut: Lut3D, r: number, g: number, b: number): Rgb {
   const { size, data } = lut;

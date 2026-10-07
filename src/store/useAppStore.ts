@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { findLogSpace, logSpaceIndex, type LogSpaceId } from '../color/log-spaces';
-import { resolveActiveLut } from '../lut/presets';
+import { loadOfficialLut, officialLutEntries } from '../lut/official-luts';
 import type { Lut3D } from '../lut/types';
 import type { FileEntry, FolderBrowseResult } from '../types/image';
 import { DEFAULT_ADJUSTMENTS, clampAdjustment, type ImageAdjustments } from '../types/adjustments';
@@ -28,8 +28,19 @@ export interface AppState {
 
   /** 调整参数，作用于当前图片 */
   adjustments: ImageAdjustments;
-  /** 当前选中的内置预设 id，null 为不使用 */
-  lutPresetId: string | null;
+  /** 当前选中的官方 LUT 键（`officialLutEntries` 里的 key），null 为不使用 */
+  officialLutKey: string | null;
+  /** 选中的官方 LUT 的解析结果；未选中或还在载入时为 null */
+  officialLut: Lut3D | null;
+  /** 官方 LUT 正在载入 */
+  officialLutLoading: boolean;
+  /**
+   * 官方 LUT 载入失败的原因。
+   *
+   * 只就地展示在 LUT 面板里，**不写进 `error`**：那会把 status 打成 error 并盖掉整个界面，
+   * 而一个读不出来的 LUT 不该让用户看不到正在看的图（与 #25 对坏文件的处理一致）。
+   */
+  officialLutError: string | null;
   /**
    * 已从文件载入的 LUT 库，按导入顺序。
    *
@@ -37,7 +48,7 @@ export interface AppState {
    * 同名（按展示名）再导入视为替换那个条目，列表与选择都不会跳。
    */
   lutLibrary: LoadedLut[];
-  /** 库中当前生效的 LUT 键；null 表示不用自定义 LUT（回落到预设或原图） */
+  /** 库中当前生效的 LUT 键；null 表示不用自定义 LUT（回落到官方 LUT 或原图） */
   customLutKey: string | null;
   /** 当前选中的 Log 色彩空间，null 表示关闭（按 sRGB 显示） */
   logSpaceId: LogSpaceId | null;
@@ -58,7 +69,10 @@ export interface AppState {
   previousImage: () => void;
   setAdjustment: <K extends keyof ImageAdjustments>(key: K, value: number) => void;
   resetAdjustments: () => void;
-  setLutPreset: (presetId: string | null) => void;
+  /** 选中一个官方 LUT；传 null 或清单里没有的键都回到「不使用」 */
+  setOfficialLut: (key: string | null) => void;
+  /** 清掉当前生效的 LUT：官方的那份与导入的那份一起 */
+  clearActiveLut: () => void;
   /**
    * 把一批解析好的 LUT 加进库（同名替换），并在当前没有选中项时自动选第一个。
    */
@@ -83,6 +97,26 @@ function isValidIndex(index: number): boolean {
 /** 已导入 LUT 的键计数器；模块级，与 store 生命周期一致 */
 let nextLutKey = 1;
 
+/** 官方 LUT 载入的竞态令牌：快速连点下拉框时，只让最后一次的结果落地 */
+let officialLutLoadToken = 0;
+
+/**
+ * 清掉官方 LUT：选择、解析结果、载入状态、错误一起。
+ *
+ * 这四样是一组——`officialLut` 只对应 `officialLutKey`，只清选择会留下
+ * 「选着 A 却挂着 B 的数据」这种状态。解析结果在 `official-luts` 里另有缓存，
+ * 再选回来不会重新解析。
+ */
+function clearedOfficialLut() {
+  officialLutLoadToken += 1;
+  return {
+    officialLutKey: null,
+    officialLut: null,
+    officialLutLoading: false,
+    officialLutError: null,
+  };
+}
+
 /**
  * 编辑态复位：换文件夹时把调整参数、LUT 选择与 Log 选择清掉。
  *
@@ -92,7 +126,7 @@ let nextLutKey = 1;
 function clearedEditState() {
   return {
     adjustments: { ...DEFAULT_ADJUSTMENTS },
-    lutPresetId: null,
+    ...clearedOfficialLut(),
     customLutKey: null,
     logSpaceId: null,
     lutOutputEncoded: false,
@@ -106,7 +140,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   status: 'empty',
   error: null,
   adjustments: { ...DEFAULT_ADJUSTMENTS },
-  lutPresetId: null,
+  ...clearedOfficialLut(),
   lutLibrary: [],
   customLutKey: null,
   logSpaceId: null,
@@ -161,7 +195,47 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   resetAdjustments: () => set({ adjustments: { ...DEFAULT_ADJUSTMENTS } }),
 
-  setLutPreset: (presetId) => set({ lutPresetId: presetId, customLutKey: null }),
+  setOfficialLut: (key) => {
+    // 只认清单里有的键：UI 传回来的字符串不可信。null 与「不认识」都落到「不使用」。
+    const entry =
+      key === null
+        ? null
+        : (officialLutEntries(get().logSpaceId).find((item) => item.key === key) ?? null);
+    const token = ++officialLutLoadToken;
+
+    if (!entry) {
+      set(clearedOfficialLut());
+      return;
+    }
+
+    set({
+      officialLutKey: entry.key,
+      officialLut: null,
+      officialLutLoading: true,
+      officialLutError: null,
+      // 官方 LUT 与导入的 LUT 互斥：同一个画面上只该有一个 LUT 生效
+      customLutKey: null,
+    });
+
+    // 只有「还是同一次载入」才允许落地：中途换了选择或换了色彩空间，这次结果就作废
+    const isCurrent = () => token === officialLutLoadToken && get().officialLutKey === entry.key;
+
+    loadOfficialLut(entry)
+      .then((lut) => {
+        if (!isCurrent()) return;
+        set({ officialLut: lut, officialLutLoading: false, officialLutError: null });
+      })
+      .catch((error: unknown) => {
+        if (!isCurrent()) return;
+        set({
+          officialLut: null,
+          officialLutLoading: false,
+          officialLutError: (error as Error).message,
+        });
+      });
+  },
+
+  clearActiveLut: () => set({ ...clearedOfficialLut(), customLutKey: null }),
 
   addCustomLuts: (entries) =>
     set((state) => {
@@ -175,13 +249,17 @@ export const useAppStore = create<AppState>((set, get) => ({
         else library.push(loaded);
       }
 
-      // 目前没选中任何自定义 LUT 时，导入后自动选第一个，省掉一次手动点击
+      // 目前没选中任何自定义 LUT 时，导入后自动选第一个，省掉一次手动点击；
+      // 这一步会让官方 LUT 让位，但只在选择真的动了的时候——同名替换不该动当前画面
       const selectedExists =
         state.customLutKey !== null && library.some((item) => item.key === state.customLutKey);
       const customLutKey = selectedExists ? state.customLutKey : (library[0]?.key ?? null);
-      const lutPresetId = customLutKey !== null ? null : state.lutPresetId;
 
-      return { lutLibrary: library, customLutKey, lutPresetId };
+      return {
+        lutLibrary: library,
+        customLutKey,
+        ...(customLutKey === state.customLutKey ? {} : clearedOfficialLut()),
+      };
     }),
 
   setActiveCustomLut: (key) =>
@@ -189,7 +267,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (key === null) return { customLutKey: null };
       // 只认库里有的键：UI 传回来的字符串不可信
       if (!state.lutLibrary.some((item) => item.key === key)) return {};
-      return { customLutKey: key, lutPresetId: null };
+      // 选了导入的 LUT，官方那份就让位：同一个画面上只该有一个生效
+      return { customLutKey: key, ...clearedOfficialLut() };
     }),
 
   removeCustomLut: (key) =>
@@ -207,8 +286,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // 只认表里有的 id：UI 传回来的字符串不可信，脏值会让着色器下标越界。
   // 关掉（null）与「不认识」都落到 null，所以分开判断，不拿空串当哨兵。
-  setLogSpace: (id) =>
-    set({ logSpaceId: (id === null ? undefined : findLogSpace(id))?.id ?? null }),
+  // 换色彩空间就是换一份 LUT 清单：上一个空间选的官方 LUT 在新空间里没有意义，跟着清掉。
+  setLogSpace: (id) => {
+    const logSpaceId = (id === null ? undefined : findLogSpace(id))?.id ?? null;
+    set({ logSpaceId, ...clearedOfficialLut() });
+  },
 
   setLutOutputEncoded: (encoded) => set({ lutOutputEncoded: encoded }),
 
@@ -225,13 +307,14 @@ export function selectCurrentImage(state: AppState): FileEntry | null {
 }
 
 /**
- * 当前生效的 LUT：选中的自定义 LUT 优先，其次内置预设，都没有则为 null。
+ * 当前生效的 LUT：选中的自定义 LUT 优先，其次官方 LUT，都没有则为 null。
  *
- * 选择项指向一个已不存在的键（库被清过）时按「没选」处理，回落预设。
+ * 两者互斥（选一个会清掉另一个），这里的先后只是兜底；选择项指向一个已不存在的
+ * 键（库被清过）时按「没选」处理。
  */
 export function selectActiveLut(state: AppState): Lut3D | null {
   const custom = state.lutLibrary.find((item) => item.key === state.customLutKey)?.lut ?? null;
-  return resolveActiveLut(custom, state.lutPresetId);
+  return custom ?? state.officialLut;
 }
 
 /**
@@ -250,7 +333,7 @@ export function selectLogSpaceIndex(state: AppState): number {
   return logSpaceIndex(state.logSpaceId);
 }
 
-/** 是否挂了 LUT（内置预设或载入的文件），用来提示 LUT 会在 Log 空间里作用 */
+/** 是否挂了 LUT（官方 LUT 或载入的文件），用来提示 LUT 会在 Log 空间里作用 */
 export function selectHasLut(state: AppState): boolean {
   return selectActiveLut(state) !== null;
 }

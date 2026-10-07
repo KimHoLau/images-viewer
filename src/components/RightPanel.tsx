@@ -49,9 +49,9 @@ export function RightPanel({ image, loading = false }: RightPanelProps) {
   const adjustments = useAppStore((state) => state.adjustments);
   const setAdjustment = useAppStore((state) => state.setAdjustment);
   const resetAdjustments = useAppStore((state) => state.resetAdjustments);
-  const lutPresetId = useAppStore((state) => state.lutPresetId);
   const hasCustomLut = useAppStore((state) => selectCustomLut(state) !== null);
-  const setLutPreset = useAppStore((state) => state.setLutPreset);
+  const hasOfficialLut = useAppStore((state) => state.officialLutKey !== null);
+  const clearActiveLut = useAppStore((state) => state.clearActiveLut);
 
   const hasImage = entry !== null;
   const modified = !isDefaultAdjustments(adjustments);
@@ -93,8 +93,8 @@ export function RightPanel({ image, loading = false }: RightPanelProps) {
           <button
             type="button"
             className="button button--tiny"
-            onClick={() => setLutPreset(null)}
-            disabled={!lutPresetId && !hasCustomLut}
+            onClick={clearActiveLut}
+            disabled={!hasOfficialLut && !hasCustomLut}
           >
             移除
           </button>

@@ -1,0 +1,14 @@
+{
+  "root": "3DLUT",
+  "sources": [
+    {
+      "logSpaceId": "arri-logc4",
+      "dir": "ARRI_LogC4_LUT/65",
+      "only": ["Gamma24_Rec709"]
+    },
+    { "logSpaceId": "f-log", "dir": "GFX_ETERNA_LUT/65Grid/F-Log" },
+    { "logSpaceId": "f-log2", "dir": "GFX_ETERNA_LUT/65Grid/F-Log2" },
+    { "logSpaceId": "f-log2c", "dir": "GFX_ETERNA_LUT/65Grid/F-Log2C" },
+    { "logSpaceId": "n-log", "dir": "NIKON_NLOG_LUT" }
+  ]
+}

@@ -1,11 +1,22 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { LOG_SPACES } from '../color/log-spaces';
+import { grayscaleLut } from '../test/lut-fixtures';
 import { makeBrowseResult } from '../test/fixtures';
 import { useAppStore } from '../store/useAppStore';
 import { LogPanel } from './LogPanel';
 
 const initialState = useAppStore.getState();
+
+/**
+ * 挂上一个 LUT。
+ *
+ * 真实流程是「先选色彩空间 → 官方 LUT 清单出来 → 在下拉里选一项」，这里直接落到 store。
+ * 注意顺序：`setLogSpace` 会清掉上一个空间选的官方 LUT（#26 的决定），所以挂 LUT 必须在它之后。
+ */
+function attachLut(): void {
+  useAppStore.setState({ officialLutKey: 'fixture', officialLut: grayscaleLut });
+}
 
 /** 色彩空间下拉框；面板里还有第二个（LUT 输出空间），按 name 区分 */
 function select(): HTMLSelectElement {
@@ -91,7 +102,7 @@ describe('LogPanel', () => {
     expect(screen.queryByText(/当前 LUT 将在/)).toBeNull();
 
     act(() => {
-      useAppStore.getState().setLutPreset('mono');
+      attachLut();
     });
     rerender(<LogPanel />);
 
@@ -122,7 +133,7 @@ describe('LogPanel', () => {
     act(() => {
       useAppStore.getState().setFolder(makeBrowseResult(['shot.jpg']));
       useAppStore.getState().setLogSpace('s-log3');
-      useAppStore.getState().setLutPreset('mono');
+      attachLut();
     });
 
     render(<LogPanel />);
@@ -133,7 +144,7 @@ describe('LogPanel', () => {
   it('RAW 挂了 LUT 但没选空间时，警告 LUT 正被套在显示值上', () => {
     act(() => {
       useAppStore.getState().setFolder(makeBrowseResult(['shot.cr2']));
-      useAppStore.getState().setLutPreset('mono');
+      attachLut();
     });
 
     render(<LogPanel />);
@@ -153,8 +164,8 @@ describe('LogPanel', () => {
   it('选了空间之后警告换成「在 X 空间里应用」', () => {
     act(() => {
       useAppStore.getState().setFolder(makeBrowseResult(['shot.cr2']));
-      useAppStore.getState().setLutPreset('mono');
       useAppStore.getState().setLogSpace('arri-logc4');
+      attachLut();
     });
 
     render(<LogPanel />);
@@ -166,8 +177,8 @@ describe('LogPanel', () => {
   it('选了空间且挂了 LUT 时，可以切换 LUT 的输出空间，默认显示空间', () => {
     act(() => {
       useAppStore.getState().setFolder(makeBrowseResult(['shot.cr2']));
-      useAppStore.getState().setLutPreset('mono');
       useAppStore.getState().setLogSpace('arri-logc4');
+      attachLut();
     });
 
     render(<LogPanel />);
@@ -188,7 +199,7 @@ describe('LogPanel', () => {
   it('没选空间时不显示输出空间切换（那时 LUT 走的是显示空间那条路）', () => {
     act(() => {
       useAppStore.getState().setFolder(makeBrowseResult(['shot.cr2']));
-      useAppStore.getState().setLutPreset('mono');
+      attachLut();
     });
 
     render(<LogPanel />);

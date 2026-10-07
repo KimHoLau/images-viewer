@@ -191,7 +191,8 @@ export function ImageCanvas({ image, loading = false }: ImageCanvasProps) {
         notifyInteraction();
       }
       if (
-        state.lutPresetId !== previous.lutPresetId ||
+        state.officialLutKey !== previous.officialLutKey ||
+        state.officialLut !== previous.officialLut ||
         state.customLutKey !== previous.customLutKey ||
         state.lutLibrary !== previous.lutLibrary
       ) {

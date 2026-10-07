@@ -17,10 +17,15 @@
 import { LOG_SPACES, logSpaceIndex } from '../color/log-spaces';
 import { ImageRenderer } from '../renderer/ImageRenderer';
 import { applyAdjustments, type Rgb } from '../renderer/adjustments-math';
-import { generateLut3D } from '../lut/generate';
-import { getPresetLut, LUT_PRESETS } from '../lut/presets';
 import { encodeImageData } from '../services/export';
 import { ImageLoader, releaseLoadedImage } from '../services/image-loader';
+import {
+  channelSwapLut,
+  grayscaleLut,
+  LUT_FIXTURES,
+  splitToneLut,
+  warmLut,
+} from '../test/lut-fixtures';
 import { DEFAULT_ADJUSTMENTS, type ImageAdjustments } from '../types/adjustments';
 
 const lines: string[] = [];
@@ -174,7 +179,7 @@ async function run(): Promise<void> {
 
     // 4. 3D LUT：轴向是否正确
     //    换通道 LUT（R←B、G←R、B←G）能一次性验出采样坐标有没有搞错轴序。
-    const swapLut = generateLut3D(2, (rgb) => [rgb[2], rgb[0], rgb[1]]);
+    const swapLut = channelSwapLut;
     renderer.setLut(swapLut);
     const swapped = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
     let worstSwap = 0;
@@ -189,18 +194,14 @@ async function run(): Promise<void> {
     );
 
     // 5. LUT 与基础调整叠加时，GPU 与 CPU 仍需一致
-    const monoLut = getPresetLut('mono')!;
-    const coolLut = getPresetLut('cool-cinema')!;
+    const monoLut = grayscaleLut;
+    const coolLut = splitToneLut;
     const lutCases: Array<[string, ImageAdjustments, typeof monoLut]> = [
-      ['黑白预设', { ...DEFAULT_ADJUSTMENTS }, monoLut],
-      ['冷调预设 + 曝光 0.5', { ...DEFAULT_ADJUSTMENTS, exposure: 0.5 }, coolLut],
+      ['黑白夹具', { ...DEFAULT_ADJUSTMENTS }, monoLut],
+      ['青橙夹具 + 曝光 0.5', { ...DEFAULT_ADJUSTMENTS, exposure: 0.5 }, coolLut],
+      ['暖调夹具 + 强度 0.4', { ...DEFAULT_ADJUSTMENTS, lutStrength: 0.4 }, warmLut],
       [
-        '暖调预设 + 强度 0.4',
-        { ...DEFAULT_ADJUSTMENTS, lutStrength: 0.4 },
-        getPresetLut('warm-film')!,
-      ],
-      [
-        '预设 + 全部调整',
+        '夹具 + 全部调整',
         {
           temperature: 0.3,
           tint: -0.2,
@@ -230,7 +231,7 @@ async function run(): Promise<void> {
       );
     }
 
-    // 6. 黑白预设应当让输出三个通道相等
+    // 6. 黑白夹具应当让输出三个通道相等
     renderer.setLut(monoLut);
     const greyed = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
     let worstGrey = 0;
@@ -239,7 +240,7 @@ async function run(): Promise<void> {
       worstGrey = Math.max(worstGrey, Math.abs(r - g), Math.abs(g - b));
     }
     report(
-      '黑白预设输出为灰',
+      '黑白夹具输出为灰',
       worstGrey <= 3 / 255,
       `最大通道差 ${(worstGrey * 255).toFixed(1)}/255`,
     );
@@ -355,11 +356,10 @@ function checkLogMode(renderer: ImageRenderer): void {
     );
   });
 
-  // 与全部 7 个 LUT 预设组合：预设形态各不相同，逐个过一遍才算「与各种 LUT 组合」
+  // 与全部夹具 LUT 组合：夹具形态各不相同，逐个过一遍才算「与各种 LUT 组合」
   const slog3 = logSpaceIndex('s-log3');
   reportGlError(renderer, 'Log 模式的 uniform 上传没有 GL 错误');
-  for (const preset of LUT_PRESETS) {
-    const lut = getPresetLut(preset.id)!;
+  for (const lut of LUT_FIXTURES) {
     renderer.setLogMode(true, slog3, slog3);
     renderer.setLut(lut);
     const gpu = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
@@ -369,7 +369,7 @@ function checkLogMode(renderer: ImageRenderer): void {
       worst = Math.max(worst, maxChannelDiff(pixelAt(gpu, at), expected));
     });
     report(
-      `Log 模式 + LUT 预设 GPU 与 CPU 一致（${preset.name}）`,
+      `Log 模式 + 夹具 LUT GPU 与 CPU 一致（${lut.title}）`,
       worst <= 6 / 255,
       `最大偏差 ${(worst * 255).toFixed(1)}/255`,
     );
@@ -379,7 +379,7 @@ function checkLogMode(renderer: ImageRenderer): void {
   // 导出走的就是渲染器的 render()，所以只要 Log 设置是渲染器状态的一部分，
   // 这一步就该是 0；用真实 GPU 跑一遍是为了确认没有哪条路径偷偷复位了它。
   renderer.setLogMode(true, slog3, slog3);
-  renderer.setLut(getPresetLut('cool-cinema')!);
+  renderer.setLut(splitToneLut);
   renderer.setAdjustments({ ...DEFAULT_ADJUSTMENTS, exposure: 0.3 });
   renderer.render();
   const onScreen = new Uint8ClampedArray(W * H * 4);
@@ -412,7 +412,7 @@ function checkLogMode(renderer: ImageRenderer): void {
   );
 
   // 强度 0 时 Log 模式应当等于不套 LUT
-  renderer.setLut(getPresetLut('mono')!);
+  renderer.setLut(grayscaleLut);
   const strengthZero = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS, lutStrength: 0 });
   renderer.setLut(null);
   const noLut = renderAndRead(renderer, { ...DEFAULT_ADJUSTMENTS });
@@ -433,7 +433,7 @@ function checkLogMode(renderer: ImageRenderer): void {
   // 置 true 时保留旧的「输出仍是 Log」路径。用同一个 LUT 各跑一遍，
   // 顺带钉住「两种解释会给出不同结果」——否则这个开关等于没接。
   {
-    const lut = getPresetLut('warm-film')!;
+    const lut = warmLut;
     renderer.setLut(lut);
     for (const encoded of [false, true]) {
       renderer.setLogMode(true, slog3, slog3, encoded);
@@ -505,10 +505,7 @@ function imageDataPixel(image: ImageData, index: number): Rgb {
  * 用一张上红下蓝的图专门验方向：readPixels 是左下原点，
  * 少翻一次就会上下颠倒，而这类错误在单一纯色图上根本看不出来。
  */
-function checkExport(
-  renderer: ImageRenderer,
-  monoLut: ReturnType<typeof getPresetLut>,
-): Promise<void> {
+function checkExport(renderer: ImageRenderer, monoLut: typeof grayscaleLut): Promise<void> {
   const W = 3;
   const H = 2;
   // 第一行红、第二行蓝

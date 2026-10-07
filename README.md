@@ -12,7 +12,12 @@ npm run build        # 生产构建
 npm test             # 单元测试
 npm run typecheck    # 类型检查
 npm run lint         # 代码检查
+npm run lut:pack     # 把 3DLUT/ 里的官方 .cube 预压缩成 .cube.gz
 ```
+
+`3DLUT/` 下的原始 `.cube` 是厂商素材（34 个文件 216 MB），不随仓库分发，`.gitignore` 已经排除；
+仓库里放的是 `npm run lut:pack` 压出来的 `.cube.gz`（约 48 MB）。要在本地补齐原始文件，
+按 `src/lut/official-lut-sources.json` 里的目录结构把厂商 LUT 放进去，再跑一次 `npm run lut:pack`。
 
 ## 技术栈
 
@@ -39,7 +44,8 @@ src/
 ├── lut/               3D LUT
 │   ├── types.ts / generate.ts        数据结构与采样函数烘焙
 │   ├── parse-cube.ts / parse-3dl.ts  .cube / .3dl 解析
-│   ├── presets.ts                    七个内置预设
+│   ├── official-lut-sources.json     色彩空间 → 3DLUT/ 目录的映射（打包脚本读同一份）
+│   ├── official-luts.ts              官方 LUT 的清单（构建期 glob）与按需载入
 │   └── texture.ts                    RGBA16F 3D 纹理上传
 ├── services/          浏览器 I/O 与纯逻辑
 │   ├── file-browser.ts       文件夹/文件打开（含降级方案）
@@ -52,8 +58,10 @@ src/
 ├── store/             Zustand：应用状态 + 视图状态
 ├── components/        UI 组件（含 LogPanel 色彩空间选择）
 ├── hooks/             数据加载与交互逻辑
-└── dev/webgl-check.ts 真实 WebGL 验证脚本（见下）
+└── dev/               真实浏览器验证脚本：webgl-check.ts / lut-check.ts（见下）
 ```
+
+仓库根的 `scripts/pack-luts.mjs` 把 `3DLUT/` 里的原始 `.cube` 压成 `.cube.gz`（`npm run lut:pack`）。
 
 **分层原则**：像素运算、几何计算、解析器、尺寸换算这类纯逻辑都从浏览器 I/O 里拆出来，
 这样它们能在 jsdom 里被单元测试盯住。
@@ -95,8 +103,19 @@ ProPhoto linear（RAW 16-bit 解码）→ 基础调整 → 目标 Log 色域 →
 色域矩阵与曲线参数取自 colour-science（`colour.matrix_RGB_to_RGB` 与 `cctf_encoding`），
 推导过程与出处记在 `research/log-color-spaces.md`。
 
-**内置预设不打包资源文件。** 七个预设写成采样函数，选中时现烘成 33³ 的 3D LUT 并缓存，
-风格逻辑可读可测，加预设就是加一个纯函数。
+**官方 LUT 按色彩空间自动出清单，且只有选中才去取文件。** 厂商的官方 LUT 是 65³ 的纯文本
+`.cube`，单个 7–9 MB：整份进仓库是 216 MB，全列出来再逐个下载是 90 MB。所以仓库里放的是
+`npm run lut:pack` 压出来的 `.cube.gz`（约 48 MB，客户端 `DecompressionStream` 解压，
+65³ 精度不变、单个传输约 1.5 MB），清单则在构建期用 `import.meta.glob` 扫出来——没有运行时
+清单请求，也不存在「清单里列了但文件不在」。`.gz` 被服务器当成预压缩资源顺手解掉时
+（`Content-Encoding: gzip`，Vite dev 与 GitHub Pages 都这么干），fetch 拿到的已经是明文；
+加载器按 gzip 魔数分流，两种都吃。
+
+**官方 LUT 与导入的 LUT 是两个选择。** 前者跟着色彩空间走（换空间就作废），后者是用户自己
+准备的素材（换文件夹都留着），所以各占一个下拉。两者互斥——选一个会清掉另一个，因为同一个
+画面上只该有一个 LUT 生效。换色彩空间只换清单，不会自动套用第一个：富士一个目录里 13 个
+LUT 风格差得很远（ACROS / ASTIA / ETERNA / Velvia…），自动选一个会让人以为「选了色彩空间
+画面就该变成那样」。
 
 **导入的 LUT 是「库 + 当前选中」两件事。** 文件输入支持一次多选，全部进 `lutLibrary`，
 再用下拉框切换当前生效的那一个；每个都能单独移除，删掉选中项会回退到库里剩下的第一个。
@@ -126,12 +145,12 @@ chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=60000 \
   --dump-dom http://localhost:5211/webgl-check.html
 ```
 
-结果在 dump 出来的 `WEBGL-CHECK-BEGIN` / `WEBGL-CHECK-END` 之间，共 63 项：
+结果在 dump 出来的 `WEBGL-CHECK-BEGIN` / `WEBGL-CHECK-END` 之间，共 62 项：
 
 - 着色器编译链接、默认参数下管线是恒等变换
 - 12 组调整参数下 GPU 输出与 CPU 实现一致（最大偏差 2.9/255，即量化误差量级）
-- 3D LUT 轴向正确（用换通道 LUT 验）、预设 GPU 与 CPU 一致、黑白预设输出为灰
-- **Log 模式：14 个空间逐个比对 GPU 与 CPU 输出（偏差 ≤ 0.6/255）、与全部 7 个 LUT 预设
+- 3D LUT 轴向正确（用换通道 LUT 验）、夹具 LUT 的 GPU 与 CPU 一致、黑白夹具输出为灰
+- **Log 模式：14 个空间逐个比对 GPU 与 CPU 输出（偏差 ≤ 0.6/255）、与全部 3 个夹具 LUT
   逐一组合、LUT 强度 0 等于不套 LUT、屏幕读回的像素与离屏导出逐像素一致（0/255）、
   关闭后退回原路径；另外读两次 GL 错误标志，因为 uniform 类型不匹配只会静默置位、不抛异常**
 - 离屏导出的尺寸、方向（readPixels 是左下原点，少翻一次就上下颠倒）、是否带上调整与 LUT
@@ -151,12 +170,44 @@ jsdom 里 522 项全绿、只有这里跑才现形。最终写法是「`near = m
 （把纯白点当作探针）就是盯这一条的。
 
 
+### 官方 LUT 加载验证
+
+`.cube.gz` 是预压缩资源，服务器对它的处理并不一致：Vite dev（实测）与 GitHub Pages 会给它加
+`Content-Encoding: gzip`，浏览器早在 fetch 那一层就替我们解了压；换个服务器又可能把 gzip 字节
+原样发出来。再加上 `ImageCanvas` 会把 `setLut` 的异常吞掉并退回「不套 LUT」——静态 LUT 静默
+失效在单测里看不出来。`src/dev/lut-check.ts` 就是为此准备的：
+
+```bash
+npx vite --port 5211
+chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=90000 \
+  --dump-dom http://localhost:5211/lut-check.html
+```
+
+结果在 dump 出来的 `LUT-CHECK-BEGIN` / `LUT-CHECK-END` 之间，共 31 项：
+
+- 14 个色彩空间逐个列清单：5 个有映射的必须有条目、其余 9 个必须为空
+- 每个映射目录取第一个 LUT 真解出来（ARRI / 富士是 65³ = 823875 个数值，尼康是 33³）
+- 把这 5 个官方 LUT 逐个套到真实 GPU 上：与 CPU 镜像的偏差 ≤ 0.5/255（实测），
+  且「套上」与「不套」的画面确实不同——后一条专门盯静默失效，只看前者会漏掉它
+- 取文件与上传 65³ 纹理之后读一次 GL 错误标志
+
+**改 `official-lut-sources.json`、换 LUT 素材、动 `scripts/pack-luts.mjs` 之后应该重跑一遍。**
+
 ## 已知限制
 
 - **1D LUT 不支持**：解析 `.cube` 时遇到 `LUT_1D_SIZE` 会抛出明确错误，而不是悄悄解析错。
 - **视频范围未转换**：`.cube` 的 `LUT_IN_VIDEO_RANGE` / `LUT_OUT_VIDEO_RANGE` 会被解析出来，
   但没有做 64–940 的范围转换。
 - **只实现了三线性插值**：调研把 tetrahedral 列为可选的第四阶段，未实现。
+- **官方 LUT 只覆盖 5 个色彩空间，且只列 SDR 显示空间的输出**：`Arri LogC4`、`F-Log`、
+  `F-Log2`、`F-Log2C`、`N-Log` 有对应目录（映射在 `src/lut/official-lut-sources.json`），
+  其余 9 个色彩空间的下拉是空的。ARRI 目录里的 P3 / HLG / St2084 输出**没有列出来**：
+  工程把 LUT 输出直接当 sRGB 显示值用，这些输出需要另外的显示管线，列出来只会得到偏色或
+  「HDR 当 SDR 看」的结果。
+- **65³ 的官方 LUT 要下载再解析**：单个约 1.5 MB、解压后 274625 行，首次选中会有可感知的
+  停顿；解析结果按文件缓存，来回切不会重解析。
+- **原始 `.cube` 不在仓库里**：仓库只放 `npm run lut:pack` 压出来的 `.cube.gz`（见「快速开始」），
+  换了厂商 LUT 要重新跑一次打包，否则清单与文件对不上。
 - **RAW 解码未在真实 RAW 文件上验证过**：仓库里没有可用的 RAW 样本，
   `raw-decoder.worker` 的调用顺序与错误路径有 mock 测试覆盖（`raw-decoder.worker.test.ts`），
   但真实文件的解码结果没有实测。首次使用时请重点确认。

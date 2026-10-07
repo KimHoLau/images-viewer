@@ -1,21 +1,47 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { findLogSpace } from '../color/log-spaces';
 import { useLutImport } from '../hooks/useLutImport';
-import { LUT_PRESETS } from '../lut/presets';
+import { officialLutEntries } from '../lut/official-luts';
 import { selectCustomLut, useAppStore } from '../store/useAppStore';
 
-/** LUT 预设选择区：内置预设 + 从 .cube / .3dl 文件载入（可一次选多个） */
+/**
+ * LUT 面板：官方预设（随色彩空间自动列出）+ 从 .cube / .3dl 文件载入（可一次选多个）。
+ *
+ * 官方 LUT 不是写死在代码里的采样函数，而是按色彩空间从工作区的 `3DLUT/` 目录取：
+ * 换一个色彩空间就换一份清单；只有在下拉里选中某一条，才去取并解析那个文件——
+ * 65³ 的 `.cube` 解压后单个就有 274625 行，一次把 13 个全拉下来是 90 MB。
+ *
+ * 官方 LUT 与导入的 LUT 各占一个下拉：生命周期不一样（前者换色彩空间就作废，
+ * 后者换文件夹都留着），放进同一个控件会让"选中的为什么被清掉"变得难解释。
+ */
 export function LutPanel() {
-  const lutPresetId = useAppStore((state) => state.lutPresetId);
+  const logSpaceId = useAppStore((state) => state.logSpaceId);
+  const officialLutKey = useAppStore((state) => state.officialLutKey);
+  const officialLutLoading = useAppStore((state) => state.officialLutLoading);
+  const officialLutError = useAppStore((state) => state.officialLutError);
+  const setOfficialLut = useAppStore((state) => state.setOfficialLut);
   const lutLibrary = useAppStore((state) => state.lutLibrary);
   const selectedCustom = useAppStore(selectCustomLut);
-  const setLutPreset = useAppStore((state) => state.setLutPreset);
   const setActiveCustomLut = useAppStore((state) => state.setActiveCustomLut);
   const removeCustomLut = useAppStore((state) => state.removeCustomLut);
   const { importLutFiles } = useLutImport();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [importErrors, setImportErrors] = useState<string[]>([]);
-  const isNeutral = lutPresetId === null && selectedCustom === null;
+
+  // 清单只取决于色彩空间。useMemo 不是为了省算力，而是让引用在重渲染之间稳定。
+  const entries = useMemo(() => officialLutEntries(logSpaceId), [logSpaceId]);
+  const spaceName = logSpaceId ? (findLogSpace(logSpaceId)?.name ?? null) : null;
+
+  const officialHint = !logSpaceId
+    ? '先在上面选一个色彩空间，这里会出现它对应的官方 LUT'
+    : officialLutLoading
+      ? '正在载入…'
+      : officialLutError
+        ? `无法载入 —— ${officialLutError}`
+        : entries.length === 0
+          ? '该色彩空间暂无内置 LUT'
+          : `已加载 ${entries.length} 个 LUT${spaceName ? `（${spaceName}）` : ''}`;
 
   const handleFileInput = useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -32,27 +58,27 @@ export function LutPanel() {
 
   return (
     <div className="lut-panel">
-      <div className="lut-list">
-        <button
-          type="button"
-          className={`lut-item${isNeutral ? ' lut-item--active' : ''}`}
-          onClick={() => setLutPreset(null)}
-        >
-          <span className="lut-item__name">原图</span>
-          <span className="lut-item__desc">不套用 LUT</span>
-        </button>
-
-        {LUT_PRESETS.map((preset) => (
-          <button
-            key={preset.id}
-            type="button"
-            className={`lut-item${lutPresetId === preset.id ? ' lut-item--active' : ''}`}
-            onClick={() => setLutPreset(preset.id)}
+      <div className="lut-presets">
+        <label className="field">
+          <span className="field__label">官方 LUT</span>
+          <select
+            className="field__control"
+            aria-label="官方 LUT"
+            value={officialLutKey ?? ''}
+            disabled={!logSpaceId || entries.length === 0}
+            onChange={(event) =>
+              setOfficialLut(event.target.value === '' ? null : event.target.value)
+            }
           >
-            <span className="lut-item__name">{preset.name}</span>
-            <span className="lut-item__desc">{preset.description}</span>
-          </button>
-        ))}
+            <option value="">不使用</option>
+            {entries.map((entry) => (
+              <option key={entry.key} value={entry.key}>
+                {entry.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className={`panel-hint${officialLutError ? ' lut-presets__error' : ''}`}>{officialHint}</p>
       </div>
 
       <div className="lut-import">
@@ -77,7 +103,7 @@ export function LutPanel() {
 
       {/*
         已载入的 LUT 用下拉框切换：库里可能有一堆，平铺会把面板撑得很长。
-        选中项为空时下拉框停在「不使用」，与上面「原图」按钮表达同一件事。
+        选中项为空时下拉框停在「不使用」，与上面官方下拉的「不使用」表达同一件事。
       */}
       {lutLibrary.length > 0 ? (
         <div className="lut-library">
