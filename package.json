@@ -2,10 +2,16 @@
   "name": "raw-images-studio",
   "private": true,
   "version": "0.1.0",
+  "description": "浏览器与 Windows 桌面版的 RAW 图片查看器：RAW 解码、LUT 调色、基础调整与导出，全部在本地完成",
+  "author": "KimHoLau",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
+    "clean:dist": "node scripts/clean-dist.mjs",
     "build": "tsc -b && vite build",
+    "build:desktop": "npm run clean:dist && tsc -b && vite build --mode desktop",
+    "pack:win": "npm run build:desktop && electron-builder --win --x64 --publish never",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -28,6 +34,8 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.4.1",
+    "electron": "44.6.0",
+    "electron-builder": "26.17.0",
     "eslint": "^9.18.0",
     "eslint-plugin-react-hooks": "^5.1.0",
     "eslint-plugin-react-refresh": "^0.4.12",
@@ -44,5 +52,38 @@
   "allowScripts": {
     "esbuild@0.25.12": true,
     "@swc/core@1.16.13": true
+  },
+  "build": {
+    "appId": "com.kimholau.raw-images-studio",
+    "productName": "raw-images-studio",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json"
+    ],
+    "asar": true,
+    "compression": "normal",
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ],
+      "signExecutable": false,
+      "artifactName": "raw-images-studio-${version}-win-x64-portable.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "differentialPackage": false,
+      "artifactName": "raw-images-studio-${version}-win-x64-setup.${ext}"
+    }
   }
 }

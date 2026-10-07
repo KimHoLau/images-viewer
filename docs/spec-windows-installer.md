@@ -1,6 +1,8 @@
 # Windows 安装包 spec —— raw-images-studio 桌面版（Electron 壳）
 
 > **状态**：已定稿（2026-10-07）。本文件是这张地图的**目的地**：实现者照着它做即可，不需要再做任何决定。
+> **实现状态**：已按本 spec 落地完成（2026-10-07，票 46）。新增/改动的文件见第 0 节；
+> 实现阶段补到的实测数字与两条缺口的状态更新见 **5.5.2**、**5.5.3**、**9.1**、**9.5**。
 > **范围**：只讲「怎么把现有的纯前端应用装进一个 Windows 安装包」。产品行为与网页版一致，不改 `src/`。
 >
 > 上游依据：
@@ -351,6 +353,12 @@ app.on('window-all-closed', () => app.quit());
 | **便携 zip** | **204,064,446 B（194.61 MiB）** | **实测**，electron-builder 26.15.3 |
 | NSIS 安装包 | **本环境未产出** | 见 5.5.1 —— **不写估算值** |
 
+> **2026-10-07 实现时的补测（spec 钉的 26.17.0，见 5.5.2）**：`app.asar` 不是 49.50 MiB 而是 **58.53 MiB**，
+> 多出的 9 MB 是 electron-builder 自动补进来的**生产依赖**（`react` / `react-dom` / `zustand` /
+> `@colorhythm/libraw-wasm` / `scheduler` / `typed-cstruct`）。这条不是配置错误——3.4 的 `files`
+> 只列了一行 `package.json`，而 electron-builder 对 `package.json` 的匹配是「连它的生产依赖一起打包」。
+> 依赖本身已经被 Vite 打进 `dist/assets/*.js`，所以进包的是**冗余**，但**总账仍在软目标内**（见 5.5.2 的实测）。
+
 > 早期在票 41 里记的「`dist/` 87.9 MB」是**探针产物**的口径：那时候的 `dist/` 里被 Vite 原样拷进了 `public/samples/相册-中文/` 下两份 18 MB 的 DNG 夹具（探针为验中文路径加的，**不在 main 上**）。main 上的真实 `dist/` 是 **49.49 MiB**。
 
 **软目标 ≤ 250 MB。** Electron 官方 win32-x64 运行时 zip 就是 150.9 MB，叠加 48.2 MB 已 gzip 的 LUT 后几乎不缩水，所以「两百多 MB」是结构性的，不是配置没调好。
@@ -379,6 +387,74 @@ app.on('window-all-closed', () => app.quit());
 **不签名时的下载面（实测，并推翻了一条早期推断）**：`.eb-cache` 从空开始，两次构建只下了 `7zip@1.0.0`（491,982 B）、`nsis-3.0.4.1`（1,287,512 B）、`nsis-resources-3.4.1`（730,800 B），合计 2.5 MB。**`winCodeSign` 没有被下载** —— 无证书时 `windowsSignToolManager` 的 `if (cscInfo)` 守卫会跳过整条签名链；而 v26 改 exe 图标/版本信息用的是纯 JS 的 `resEdit.js`，也不再需要它。实测 exe 的版本资源正确写成了 `0.0.1 / raw-images-studio / <author>`。（本机 `%LOCALAPPDATA%` 下另有一份 2026-09-13 的旧 `winCodeSign`，与本次构建无关。）
 
 **一条 `signAndEditExecutable` 的反面证据**（说明为什么 3.4 选的是 `signExecutable`）：把它设成 `false` 后，体积与下载面**零差别**（zip 差 54 B、`app.asar` 逐字节相同），但 exe 版本资源退回 Electron 原版，白白丢掉 FileVersion / ProductName / CompanyName / FileDescription，而且**并不能**解开上面那个 NSIS 故障。
+
+#### 5.5.2 实现完成时的实测（2026-10-07，票 46）
+
+环境与 5.5.1 同一台机器，但跑在**不受文件系统限制**的会话里（5.5.1 的 `%TEMP%` 只读，见下），
+`electron-builder` **26.17.0** + Electron **44.6.0**（`npm install` 落地的本机 `node_modules/electron`），
+暖缓存单次出包 **228.1 s** 墙钟：
+
+| 产物 | 字节数 | MiB | 说明 |
+| --- | --- | --- | --- |
+| `dist/` | 51,890,398 | 49.49 | 40 个文件，与 5.5.1 逐字节相同 |
+| `resources/app.asar` | 61,369,124 | 58.53 | 比 5.5.1 多 9 MB：生产依赖被自动补进包（见 5.5 的补注） |
+| `win-unpacked/` 总计 | 446,812,541 | 426.11 | 74 个文件；最大单文件仍是 `raw-images-studio.exe` 246,238,720 B |
+| **`...-portable.zip`** | **205,732,311** | **196.20** | **实测** |
+| **`...-setup.exe`（NSIS）** | **160,715,589** | **153.27** | **实测（本环境首次产出，见下）** |
+
+**对软目标的结论（这次是实测，不是推断）**：`setup.exe` **153.27 MiB**、便携 zip **196.20 MiB**，
+**两个都距 250 MB 软目标有 50 MiB 以上余量**。NSIS 比 zip 小约 43 MiB，是因为走 7z 压缩流
+（中间载荷 `raw-images-studio-0.1.0-x64.nsis.7z` 160,715,589 B 量级）。
+
+**NSIS 安装包这次产出了 —— 5.5.1 的「本环境跑不了 NSIS」是一个临时目录权限问题，不是结构性问题。**
+失败形态是 `makensis` 报 `!tempfile: Unable to create temporary file!`，
+报错落在 `assistedInstaller.nsh:75` 的 `_Switch`（安装模式选择页用的临时文件），
+**与 `oneClick: false` 直接相关**。用最小 `.nsi` 隔离复现：默认环境 rc=1 且报同一个 `!tempfile` 错；
+把 `TEMP`/`TMP`/`TMPDIR` 指向一个可写目录后 **rc=0，安装器编出来了**。据此：
+`makensis` 本身编译正常（rc=0），死的是**在 `%TEMP%` 里建临时文件**这一步。
+
+因此**本机现在可以出 `setup.exe`**，前提是构建时 `TEMP` 指向可写目录：
+
+```powershell
+$env:TEMP = "D:\...\可写目录"; $env:TMP = $env:TEMP; $env:TMPDIR = $env:TEMP
+npx electron-builder --win --x64 --publish never
+```
+
+实测产物属性（与 5.5.1 的推断一致，这次是数字）：exe 版本资源 = `0.1.0 / raw-images-studio / KimHoLau`，
+内嵌 manifest 的 `requestedExecutionLevel` = **`asInvoker`**（应用不请求提权，与 5.1 一致）。
+
+> 5.5.1 关于「任何 NSIS 安装器在这台机器上都执行不了（返回 2 而不是 42）」的记录仍然保留——那是那次
+> 会话的观测，只是**结论被收窄了**：它不是这台机器的固有属性，而是 `%TEMP%` 不可写导致的。
+> CI（`windows-latest`）上不存在这个限制，9.1 的断言仍然要留（它盯的是「只出了 zip」这种静默情况）。
+
+#### 5.5.3 asar 里的 48.2 MB LUT：关键路径实测（关掉 4.2 的残余风险）
+
+4.2 把「asar 内文件经 `file:` 是否支持 Range / 分段读」列为**没有一手依据的残余风险**，并给出退路判据。
+实现完成时用一段一次性探针（`spike/_issue46/main.cjs`，未进仓库）**直接量了这条路径**：
+把 `dist/` 用 `asar pack` 打成 `dist.asar`（51,910,286 B，里面 34 个 `.gz` 齐全），
+再用 4.1 那段配方原样服务，在 `app://bundle/` 的渲染进程里跑 8 项断言 —— **全部 PASS**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 页面标题来自 `dist/index.html` | `Raw Images Studio` |
+| `app://` 下 `fetch` 根绝对路径 | 200 |
+| 清单条目 | 34 |
+| `fetch` 一个 `.cube.gz`（**在 asar 里**） | 200，**2,911,296 B**（与 2.4 的实测数字逐字节相同） |
+| 该响应的 `content-type` | `application/octet-stream`（**没有**被协议层当预压缩层双重解压） |
+| `content-length` 与实收 | 一致 |
+| `DecompressionStream` 解出明文 | **9,062,640 字符**，含 `LUT_3D_SIZE 65`（与 2.4 一致） |
+| LibRaw `.wasm` | 200，`application/wasm`，853,083 B，魔数 `0061736d` |
+
+**结论：4.2 的退路（`asarUnpack`）不需要触发**，`.gz` 留在 asar 里在 26.17.0 + Electron 44.6.0 上成立。
+另外这次也确认了 `dist/index.html` 里的资源是**根绝对路径**（`/assets/...`），与 3.2 的桌面分支一致。
+
+> 探针跑了两次才全绿，两次都是探针自己的断言写错（`.cube` 明文的开头不是 `#` 而是 `LUT_3D_SIZE`；
+> wasm 魔数期望值多写了一个 `0`）——**产品代码一个字没改**。这条值得记下来：探针的断言也要当代码审。
+
+> 探针与 2.4 一样跑在 `--no-sandbox` 下（本会话的进程令牌同样建不出 Chromium 的 OS 级沙箱，
+> 不加就以 `0x80000003` 退出）。打包后的 `release/win-unpacked/raw-images-studio.exe` 也实测过：
+> 不带 `--no-sandbox` 时同样以 `0x80000003` 退出，带它就正常起窗并初始化 `userData` ——
+> 与 2.4 的证据环境限制是同一条，**不是产物缺陷**，真机不受此限（见 8.12）。
 
 ## 6. 发版链路
 
@@ -587,12 +663,16 @@ README 只加**一小节**（不塞长教程），放在 `## 部署` 之前：
 ### 9.1 构建产物（CI，或任何能执行 NSIS 安装器的 Windows 机器）
 
 > 「本地」不够：这台机器执行不了 NSIS 安装器，`setup.exe` 在这里**必然**产不出来（见 5.5.1）。所以下面涉及 `pack:win` 与 `setup.exe` 的两条，要在 CI 或普通 Windows 主机上过。
+>
+> **2026-10-07 更新（票 46，见 5.5.2）**：这条已被收窄——本机 `%TEMP%` 可写时 `setup.exe` **能**产出，
+> 上面第 3、4 两条已在本地过掉（160,715,589 B / 153.27 MiB）。CI 上的断言（6.1）保留不变，
+> 因为它盯的是「只出了 zip 却绿着建 draft」这种静默情况，与本地能不能跑无关。
 
-- [ ] `npm run build:desktop` 成功，且 `dist/` 里**只有本次**的产物（`clean:dist` 生效）。
-- [ ] `dist/assets/*.gz` 恰好 **34 个**。`lut:pack` 不是打包前置（见 3.2），而清单是构建期静默扫出来的——**少一个文件不会报错，只会安静地少几个 LUT**，所以这条必须当成检查项。
-- [ ] `npm run pack:win` 产出 `release/` 下的 `...-setup.exe` 与 `...-portable.zip`，文件名与 5.3 逐字一致（无空格、纯 ASCII）。
-- [ ] **`...-setup.exe` 真的产出了。** 本环境里 NSIS 安装器执行不了，这一步**没有在这里验过**（见 5.5.1）——第一次 CI/真机跑必须确认它出来。CI 里已有一条断言专门盯这件事（6.1）。
-- [ ] 两个产物的体积记录在案（5.5.1），与软目标 250 MB 的差距有解释。
+- [x] `npm run build:desktop` 成功，且 `dist/` 里**只有本次**的产物（`clean:dist` 生效）。**（票 46 实测：51,890,398 B / 40 个文件，8.6 s）**
+- [x] `dist/assets/*.gz` 恰好 **34 个**。`lut:pack` 不是打包前置（见 3.2），而清单是构建期静默扫出来的——**少一个文件不会报错，只会安静地少几个 LUT**，所以这条必须当成检查项。**（票 46 实测：34）**
+- [x] `npm run pack:win` 产出 `release/` 下的 `...-setup.exe` 与 `...-portable.zip`，文件名与 5.3 逐字一致（无空格、纯 ASCII）。**（票 46 实测：`raw-images-studio-0.1.0-win-x64-setup.exe` / `-portable.zip`，正则核对通过）**
+- [x] **`...-setup.exe` 真的产出了。** 本环境里 NSIS 安装器执行不了，这一步**没有在这里验过**（见 5.5.1）——第一次 CI/真机跑必须确认它出来。CI 里已有一条断言专门盯这件事（6.1）。**（票 46 实测：产出了，见 5.5.2；原因是 `%TEMP%` 可写）**
+- [x] 两个产物的体积记录在案（5.5.1），与软目标 250 MB 的差距有解释。**（票 46 实测：153.27 / 196.20 MiB，见 5.5.2）**
 - [ ] `release/` 里没有把打包器自己的中间产物扫进包里（`directories.output` 不是 `dist`）。
 
 ### 9.2 干净 Win10/11 机器上安装
@@ -632,7 +712,18 @@ README 只加**一小节**（不塞长教程），放在 `## 部署` 之前：
 | 无 GPU / 远程桌面的真机表现 | 本机 `--spike-no-gpu` 变体跑挂；网页版基线在 SwiftShader 下 WebGL2 + 浮点纹理全通 | 间接证据成立，真机未验 |
 | 真机断网首次启动 | 两条旁证见 4.4 | 旁证成立，人眼未验 |
 | 便携 zip 解压后启动、它的用户数据确实落在 `%APPDATA%`、以及它的 `app.asar` 里 34 个 `.cube.gz` 齐全 | 需要真机跑 | 未验（只按官方机制与「两 target 共用一份 `files` 清单」推断，见 5.2） |
-| **NSIS 安装包的产出与安装** | electron-builder 生成卸载器那一步要**真跑一次安装器**，本环境跑不起来（退出码 2，已用手写 `.nsi` 隔离复现） | `setup.exe` 未产出；CI/真机第一轮必须确认（见 9.1） |
+| **NSIS 安装包的产出与安装** | electron-builder 生成卸载器那一步要**真跑一次安装器**，本环境跑不起来（退出码 2，已用手写 `.nsi` 隔离复现） | **产出已验**（票 46，见 5.5.2：本机 `%TEMP%` 可写就出得来，153.27 MiB）；**安装向导 / 卸载仍须真机人眼**（9.2 / 9.4） |
+
+**票 46 关掉的两条**（原来是缺口，现在有实测）：
+
+- **4.2 的残余风险**（asar 里的 `.gz` 取不取得到、解不解得开）→ 已实测通过，退路不需要触发，见 **5.5.3**。
+- **`setup.exe` 的产出** → 已在本机产出，见 **5.5.2**；但「双击安装、走完向导、卸载干净」仍然要人，
+  留在 9.2 / 9.4。
+
+**票 46 新增的一条缺口**：打包后的 `release/win-unpacked/raw-images-studio.exe`
+在这台机器上不带 `--no-sandbox` 会以 `0x80000003` 退出（同 2.4 的证据环境限制），
+带 `--no-sandbox` 则正常起窗、正常初始化 `userData`。**真机（普通用户令牌）不受此限，但这一条本机没法证伪**——
+第一次真机跑请顺手确认：**双击 exe 能出窗口**。
 
 ## 10. 证据索引
 

@@ -1,6 +1,8 @@
 node_modules
 dist
 dist-ssr
+# electron-builder 的产物目录（安装包 / 便携 zip / win-unpacked），与 Vite 的 dist 不是一回事
+release
 coverage
 *.local
 .DS_Store
@@ -14,3 +16,8 @@ samples/
 3DLUT/**/*.pdf
 # DSH 的 issue-tracker 插件缓存（本地会话状态，含服务端 issue 快照与日志）
 .dsh-mattskillsdeck-cache/
+# 一次性 spike 探针工作区（票 41 / 票 46 的证据现场）：里面有 NSIS、node_modules、
+# Chromium userdata 与厂商 DNG 夹具，体积几百 MB。按 spec 第 10 节，探针不进 main。
+spike/
+# electron-builder 的工具链缓存
+.eb-cache/

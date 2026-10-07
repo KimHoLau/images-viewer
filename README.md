@@ -315,8 +315,8 @@ node scripts/verify-export-exif.mjs          # --keep 保留产物，自己拿�
 
 下载在 [Releases](https://github.com/KimHoLau/raw-images-studio/releases)：
 
-- `raw-images-studio-<version>-win-x64-setup.exe` —— 安装版，装到当前用户，**不需要管理员权限**
-- `raw-images-studio-<version>-win-x64-portable.zip` —— 便携版，解压即用
+- `raw-images-studio-<version>-win-x64-setup.exe` —— 安装版，装到当前用户，**不需要管理员权限**（0.1.0 实测 153 MiB）
+- `raw-images-studio-<version>-win-x64-portable.zip` —— 便携版，解压即用（0.1.0 实测 196 MiB）
 
 **这个包没有代码签名**：第一次运行会看到 SmartScreen 的「Windows protected your PC」，
 点「更多信息」→「仍要运行」即可。每个新版本都要重新攒一次声誉 —— 这是不做签名的代价，不是文件损坏。
@@ -329,6 +329,11 @@ node scripts/verify-export-exif.mjs          # --keep 保留产物，自己拿�
 ```bash
 npm run pack:win     # = npm run build:desktop && electron-builder --win --x64 --publish never
 ```
+
+> **NSIS 安装包要求 `%TEMP%` 可写。** `makensis` 生成安装向导的「安装模式选择页」时要在临时目录里建文件，
+> 建不出来就报 `!tempfile: Unable to create temporary file!`，而且**只在 NSIS 那一步失败，zip 照常产出**。
+> 撞到这个错就把 `TEMP`/`TMP`/`TMPDIR` 指到一个可写目录再跑一次（CI 上不存在这个问题）。
+> 详见 [`docs/spec-windows-installer.md`](docs/spec-windows-installer.md) 的 5.5.2。
 
 发版：推一个等于 `v<package.json version>` 的 tag，`.github/workflows/release-windows.yml` 会出两个产物
 加一份 `SHA256SUMS.txt`，并建一个 **draft** Release 等你确认后再发布。

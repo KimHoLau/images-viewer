@@ -1,0 +1,103 @@
+name: Release Windows
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要重新出包的已存在 tag（例如 v0.1.0）'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-windows-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # 必须在 npm ci 之前：electron 的 postinstall 与 electron-builder 的 @electron/get
+      # 都会往这两个目录落发行包，缓存恢复晚一步就等于没有缓存。
+      - name: 缓存 Electron 发行包与 electron-builder 工具链
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/eb-cache
+            ${{ env.LOCALAPPDATA }}/electron/Cache
+          key: eb-win-${{ hashFiles('package-lock.json') }}
+
+      - run: npm ci
+
+      - name: 校验 tag 与 package.json 一致
+        shell: pwsh
+        run: |
+          $tag = if ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($tag -ne "v$pkg") { Write-Error "tag $tag 与 package.json version $pkg 不一致（要求 v$pkg）"; exit 1 }
+          Write-Output "tag=$tag version=$pkg OK"
+
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
+      - run: npm run build:desktop
+
+      # 直接调 electron-builder，不走 pack:win：build:desktop 上面已经跑过，
+      # pack:win 会把 clean + vite build 再来一遍（electron-builder 自己不会构建前端）。
+      - name: 出 NSIS 安装包 + 便携 zip
+        run: npx electron-builder --win --x64 --publish never
+        env:
+          ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/eb-cache
+
+      # 「NSIS 只出了 zip」必须在这里红掉，而不是绿着建出一个缺安装包的 draft。
+      - name: 断言两个产物都在
+        shell: pwsh
+        run: |
+          $missing = @()
+          if (-not (Get-ChildItem release -Filter '*-setup.exe')) { $missing += 'setup.exe' }
+          if (-not (Get-ChildItem release -Filter '*-portable.zip')) { $missing += 'portable.zip' }
+          Get-ChildItem release -File | Select-Object Name, Length
+          if ($missing.Count) { Write-Error "产物缺失：$($missing -join ', ')"; exit 1 }
+          $gz = @(Get-ChildItem dist\assets -Filter '*.gz').Count
+          if ($gz -ne 34) { Write-Error "dist/assets 下的 .gz 是 $gz 个，应为 34 个（见 3.2）"; exit 1 }
+
+      - name: 生成校验和
+        shell: pwsh
+        run: |
+          Get-ChildItem release -File |
+            Where-Object { $_.Extension -in '.exe', '.zip' } |
+            ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } |
+            Set-Content release/SHA256SUMS.txt -Encoding ascii
+          Get-Content release/SHA256SUMS.txt
+
+      - name: 建 draft Release 并上传
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = if ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          $assets = @(Get-ChildItem release -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object { $_.FullName })
+          $assets += 'release/SHA256SUMS.txt'
+          # 模板里的 <version> 在这里替换掉（tag 去掉前导 v），不留给人工
+          $version = $tag -replace '^v', ''
+          (Get-Content .github/release-notes-template.md -Raw) -replace '<version>', $version |
+            Set-Content release/release-notes.md -Encoding utf8
+          gh release view $tag --json isDraft 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --draft --title $tag --notes-file release/release-notes.md --verify-tag
+          }
+          gh release upload $tag @assets --clobber
