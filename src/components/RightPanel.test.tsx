@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LoadedImage } from '../services/image-loader';
 import type { RawMetadata } from '../services/raw-decoder.worker';
-import { makeBrowseResult } from '../test/fixtures';
+import { makeBrowseResult, makeRawMetadata } from '../test/fixtures';
 import { useAppStore } from '../store/useAppStore';
 import { RightPanel } from './RightPanel';
 
@@ -48,18 +48,7 @@ describe('RightPanel', () => {
     render(
       <RightPanel
         image={makeImage({
-          metadata: {
-            width: 6000,
-            height: 4000,
-            make: 'Canon',
-            model: 'EOS R5',
-            colors: 3,
-            iso: 400,
-            shutter: 1 / 200,
-            aperture: 2.8,
-            focalLength: 35,
-            timestamp: 0,
-          },
+          metadata: makeRawMetadata({ shutter: 1 / 200 }),
         })}
       />,
     );

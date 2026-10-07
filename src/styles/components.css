@@ -350,6 +350,24 @@
   opacity: 0.5;
 }
 
+/* 勾选类字段：一行放下方框与文字 */
+.field--check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.field--check input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.field--check input:disabled {
+  opacity: 0.5;
+}
+
 .export-panel__summary {
   padding: 8px 0 2px;
   color: var(--text-faint);

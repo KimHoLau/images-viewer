@@ -1,8 +1,15 @@
 import type { ImageRenderer } from '../renderer/ImageRenderer';
 import type { Size } from '../renderer/view-transform';
+import {
+  attachRawExif,
+  type ExifAttachStatus,
+  type ExifContainerFormat,
+  type RawExifSource,
+} from './exif';
 import { fitWithin } from './thumbnail-core';
 
-export type ExportFormat = 'jpeg' | 'webp' | 'png';
+/** 可导出的格式。与「能承载 EXIF 的容器」是同一组，定义在 exif.ts，这里只是沿用 */
+export type ExportFormat = ExifContainerFormat;
 
 export interface ExportFormatInfo {
   id: ExportFormat;
@@ -11,6 +18,14 @@ export interface ExportFormatInfo {
   extension: string;
   /** 有损格式才有质量参数 */
   lossy: boolean;
+  /**
+   * 这个格式会不会写入原拍摄 EXIF。
+   *
+   * WebP 为 false：它的 `EXIF` chunk 载荷框架规范里没写、读者支持也找不到一手依据，
+   * 两处不确定叠在一起，G1 决定不做。导出面板会拿它如实标注。
+   * 真正决定写不写的是 `attachRawExif`，这里只是给 UI 用的声明，两者由测试钉在一起。
+   */
+  carriesExif: boolean;
   description: string;
 }
 
@@ -21,6 +36,7 @@ export const EXPORT_FORMATS: readonly ExportFormatInfo[] = [
     mimeType: 'image/jpeg',
     extension: 'jpg',
     lossy: true,
+    carriesExif: true,
     description: '体积最小，兼容性最好',
   },
   {
@@ -29,6 +45,7 @@ export const EXPORT_FORMATS: readonly ExportFormatInfo[] = [
     mimeType: 'image/webp',
     extension: 'webp',
     lossy: true,
+    carriesExif: false,
     description: '同画质下比 JPEG 更小',
   },
   {
@@ -37,6 +54,7 @@ export const EXPORT_FORMATS: readonly ExportFormatInfo[] = [
     mimeType: 'image/png',
     extension: 'png',
     lossy: false,
+    carriesExif: true,
     description: '无损，适合再编辑',
   },
 ] as const;
@@ -102,6 +120,11 @@ export interface ExportOptions {
   quality: number;
   /** 长边上限，null 表示原尺寸 */
   maxLongEdge: number | null;
+  /**
+   * 原拍摄 EXIF 的来源。null / 缺省表示这次导出不带 EXIF——非 RAW 源就是这种情况，
+   * 按需求范围只保留 RAW 源的拍摄信息。
+   */
+  exif?: RawExifSource | null;
 }
 
 export interface ExportResult {
@@ -109,6 +132,8 @@ export interface ExportResult {
   width: number;
   height: number;
   fileName: string;
+  /** EXIF 到底带上了没有，调用方据此如实告知用户 */
+  exifStatus: ExifAttachStatus;
 }
 
 function clampQuality(quality: number): number {
@@ -158,8 +183,29 @@ export async function encodeImageData(
 }
 
 /**
+ * 把原拍摄 EXIF 注进编码结果。
+ *
+ * 只有真的写进去了才重建 Blob：没来源、格式不支持或写入出错时原样返回，
+ * 省掉一次整图拷贝，也保证「没带上」时导出的字节与编码器产出的一模一样。
+ */
+async function attachExif(
+  blob: Blob,
+  format: ExportFormat,
+  source: RawExifSource | null | undefined,
+  size: Size,
+): Promise<{ blob: Blob; status: ExifAttachStatus }> {
+  if (!source) return { blob, status: 'unavailable' };
+
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const result = attachRawExif(bytes, format, source, size);
+  if (result.status !== 'attached') return { blob, status: result.status };
+
+  return { blob: new Blob([result.bytes], { type: blob.type }), status: 'attached' };
+}
+
+/**
  * 导出：复用画布上的渲染器（图片、调整、LUT 都已经在里面），
- * 按目标尺寸离屏渲染一遍再编码。
+ * 按目标尺寸离屏渲染一遍再编码，最后把原拍摄 EXIF 注进编码结果。
  *
  * 这里刻意不去读 store 里的 logSpaceId：Log 模式、输入像素空间、曲线与色域矩阵
  * 都是渲染器自己的状态，离屏渲染走的又是同一个 render()，所以导出结果与屏幕
@@ -172,13 +218,15 @@ export async function renderExport(
 ): Promise<ExportResult> {
   const size = computeExportSize(renderer.getImageSize(), options.maxLongEdge);
   const imageData = renderer.renderToImageData(size.width, size.height);
-  const blob = await encodeImageData(imageData, options.format, options.quality);
+  const encoded = await encodeImageData(imageData, options.format, options.quality);
+  const { blob, status } = await attachExif(encoded, options.format, options.exif, size);
 
   return {
     blob,
     width: size.width,
     height: size.height,
     fileName: suggestFileName(originalName, options.format, size),
+    exifStatus: status,
   };
 }
 

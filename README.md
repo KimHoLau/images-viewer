@@ -51,17 +51,21 @@ src/
 │   ├── file-browser.ts       文件夹/文件打开（含降级方案）
 │   ├── image-loader.ts       统一的图片加载入口
 │   ├── raw-decoder.worker.ts RAW 解码 Worker（sRGB 8-bit / ProPhoto linear 16-bit）
+│   ├── raw-metadata.ts       LibRaw getter → RawMetadata 的映射（worker 与验证脚本共用）
 │   ├── libraw-loader.ts      LibRaw WASM 初始化
 │   ├── thumbnail*.ts         缩略图（Worker + IndexedDB + LRU）
 │   ├── export.ts             导出（尺寸、编码、下载）
+│   ├── exif.ts               导出 EXIF：读 RAW 容器的 IFD、筛字段、序列化、注入容器
 │   └── pixel-utils.ts        位图/像素缓冲工具
 ├── store/             Zustand：应用状态 + 视图状态
 ├── components/        UI 组件（含 LogPanel 色彩空间选择）
 ├── hooks/             数据加载与交互逻辑
-└── dev/               真实浏览器验证脚本：webgl-check.ts / lut-check.ts（见下）
+└── dev/               真实浏览器验证脚本：webgl-check.ts / lut-check.ts / exif-check.ts（见下）
 ```
 
-仓库根的 `scripts/pack-luts.mjs` 把 `3DLUT/` 里的原始 `.cube` 压成 `.cube.gz`（`npm run lut:pack`）。
+仓库根的 `scripts/pack-luts.mjs` 把 `3DLUT/` 里的原始 `.cube` 压成 `.cube.gz`（`npm run lut:pack`）；
+`scripts/probe-thumb-exif.mjs` 探一份 RAW 的内嵌预览 APP1 / 容器 IFD / LibRaw 三组字段，
+`scripts/verify-export-exif.mjs` 是导出 EXIF 的端到端验证（见「导出 EXIF 验证」）。
 
 **分层原则**：像素运算、几何计算、解析器、尺寸换算这类纯逻辑都从浏览器 I/O 里拆出来，
 这样它们能在 jsdom 里被单元测试盯住。
@@ -193,6 +197,35 @@ chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=90000 \
 
 **改 `official-lut-sources.json`、换 LUT 素材、动 `scripts/pack-luts.mjs` 之后应该重跑一遍。**
 
+### 导出 EXIF 验证
+
+导出的图片要带上原 RAW 的拍摄信息（相机、镜头、曝光三要素、拍摄时间）。这件事有两处
+单测看不见的风险：canvas 编码器真正吐出来的字节长什么样（有没有 JFIF APP0、PNG 的 chunk
+怎么排、插进去的段会不会顶掉它），以及**用自己写的解析器验自己写的字节是循环论证**——
+读写两头一起错也照样自洽。
+
+```bash
+node scripts/verify-export-exif.mjs          # --keep 保留产物，自己拿看图软件打开
+```
+
+它起 vite、起一个收结果的本地服务、驱动 headless chrome 跑 `exif-check.html`，把产物落盘后
+交给 **Pillow**（另一份 EXIF 实现）逐项判定。结果分两段打印：页面自查（真浏览器里的编码与
+注入）与 Pillow 核对，共 90 项。
+
+在 `samples/IMGP2971.DNG`（宾得 K-30，容器是 `MM` 大端）上实测：
+
+- 容器 IFD 那条路取到 `Make=PENTAX`、`Model=PENTAX K-30`、`Software=K-30 Ver 1.06`、
+  `DateTime`/`DateTimeOriginal=2026:10:05 13:16:28`、`Artist=KIMHO`、`ISO=100`、35mm 等效 46
+- 像素绑定字段被归一化：`Orientation=1`、像素尺寸跟着导出尺寸走（缩到长边 640 时是 640×427）
+- 非 TIFF 容器走 LibRaw 字段兜底那条路验了**两遍**：一遍喂手写字面量（覆盖镜头/机身序列号
+  种类），一遍喂**真 LibRaw 从样本解出来的**元数据（证明这条链在真实数据上走得通）。
+  两遍都经由产品路径同一个 `buildRawMetadata`，所以验证脚本不会和 worker 悄悄漂开
+- 每份产物都确认**没有**写进去的东西：`GPSInfo`、`MakerNote`、容器专属的 `CFARepeatPatternDim`
+- 每份产物都用 Pillow **完整解一遍像素**——注入要是破坏了熵编码数据，只看文件头发现不了
+- WebP 带来源与不带来源的字节数完全相同——`unsupported` 没有偷偷改字节
+
+**动 `src/services/exif.ts`、`raw-metadata.ts` 或导出管线之后应该重跑一遍。**
+
 ## 已知限制
 
 - **1D LUT 不支持**：解析 `.cube` 时遇到 `LUT_1D_SIZE` 会抛出明确错误，而不是悄悄解析错。
@@ -208,12 +241,34 @@ chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=90000 \
   停顿；解析结果按文件缓存，来回切不会重解析。
 - **原始 `.cube` 不在仓库里**：仓库只放 `npm run lut:pack` 压出来的 `.cube.gz`（见「快速开始」），
   换了厂商 LUT 要重新跑一次打包，否则清单与文件对不上。
-- **RAW 解码未在真实 RAW 文件上验证过**：仓库里没有可用的 RAW 样本，
-  `raw-decoder.worker` 的调用顺序与错误路径有 mock 测试覆盖（`raw-decoder.worker.test.ts`），
-  但真实文件的解码结果没有实测。首次使用时请重点确认。
+- **RAW 解码只在 `samples/IMGP2971.DNG`（宾得 K-30）上实测过**：其他厂商与格式未验。
+  `raw-decoder.worker` 的调用顺序与错误路径有 mock 测试覆盖（`raw-decoder.worker.test.ts`）。
+  用别的机器拍的文件时请重点确认。
   Log 模式走的 ProPhoto linear 16-bit 路径同样只有 mock 覆盖（GPU 侧的数学已在
   `webgl-check` 里逐空间比对过，缺的是真实 RAW 那一段）。
 - **导出走 `<a download>`**：没有用 `showSaveFilePicker` 做「另存为」。
+- **导出 EXIF 只保留拍摄信息，且只有 JPEG 与 PNG 写**：
+  - **WebP 不写**：它的 `EXIF` chunk 载荷在容器规范里没写清楚、读者支持也找不到一手依据，
+    两处不确定叠在一起，所以不做。导出面板在选中 WebP 时会如实标注。
+  - **只保留，不编辑**：写进去的是从 RAW 源读到的原值，没有手填作者/版权/关键词的入口；
+    也**不写** GPS（避免导出文件默认外泄位置）。面板给了一个「保留拍摄信息（EXIF）」开关
+    （默认开），关掉就导出一份干净的图。
+  - **MakerNote 与容器专属标签不搬**：MakerNote 的内部偏移搬到新块里多半失效（ExifTool
+    自己也要 `-fixBase` 去修），宁可不带也不带一份坏的；`StripOffsets`/`SubIFDs`/`DNGPrivateData`
+    这类指向原文件其他位置的标签更不能带。
+  - **只认 TIFF 系容器的 IFD**（DNG/NEF/ARW/CR2/PEF/SRW/ORF/RW2）：CR3/RAF/X3F 这类非 TIFF
+    封装走 LibRaw 解析出的字段兜底，字段比容器 IFD 少（拿不到 `ExposureProgram`/`MeteringMode`/
+    `Flash` 等）。内嵌预览里的 APP1 **没有**作为第三条来源——实测仓库里唯一那份样本的预览是
+    裸 JPEG，`dcrawMakeMemThumb()` 给的那条 APP1 是 LibRaw 合成的最小块（`Software` 写着
+    `dcraw v9.26`），没有 MakerNote 与拍摄时间。
+  - **源范围只含 RAW**：常规格式（JPEG/PNG/WebP/TIFF）源文件的 EXIF 不参与保留。
+  - **`Orientation` 一律写 1**，前提是「解码出来的像素已经摆正」。撑住这条的是 LibRaw 的
+    `user_flip` 默认值 `-1`（取 RAW 里的方向），解码路径从没设过它，所以 `dcrawProcess()`
+    会按原文件的方向把像素转正。**但仓库唯一的样本 `getFlip()` 是 0，需要旋转的 RAW 没有实测
+    覆盖**，只有 LibRaw 文档支撑；第一次拿竖拍 RAW 导出时请重点确认方向。
+  - **ASCII 标签按 Latin-1 取字节**（`& 0xff`）：相机写进来的字符串基本是 ASCII，偶尔带
+    Latin-1 重音字符（é）也对；但 `U+00FF` 以上的码位（中文等）无法往返。EXIF 的 ASCII 类型
+    本身只认 7 位，这类文本在规范里该走 `UserComment`，本项目不做那套转换。
 - **Log 模式下的基础调整仍在 ProPhoto linear 上做**，亮度权重还是 Rec.709 那一组
   （`0.2126/0.7152/0.0722`）。它和 ProPhoto 原色不是一套，影响的是高光/阴影与饱和度
   对色相的加权方式。这里有意保持与调整功能引入时一致——本功能只做色彩空间转换，

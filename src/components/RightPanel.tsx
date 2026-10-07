@@ -138,7 +138,7 @@ export function RightPanel({ image, loading = false }: RightPanelProps) {
       </PanelSection>
 
       <PanelSection title="导出">
-        <ExportPanel />
+        <ExportPanel metadata={metadata} />
       </PanelSection>
     </div>
   );

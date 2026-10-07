@@ -145,6 +145,16 @@ src/workers/thumbnail.worker.ts:72-74 if (thumb.type_ === 'LIBRAW_IMAGE_JPEG' ..
 So `dcrawMakeMemThumb()` output is fed straight into `createImageBitmap()` and the JPEG bytes
 (including whatever APP1 segment LibRaw produced) are dropped afterwards.
 
+> **实测更新（后补，`scripts/probe-thumb-exif.mjs`）：本仓库唯一的真实样本 `samples/IMGP2971.DNG`
+> 走的正是上面 1.4 里那个 else 分支。** 它的内嵌预览是**裸 JPEG**（文件偏移 16771232 处
+> `FFD8` 后直接是 `FFDB`，没有任何 `FFE1` APP1），所以 `T.thumb + 6` 不是 `Exif\0`，
+> LibRaw 用 `tiff_head()` 合成了一条最小块：标出的标签集与下面 1.5 的写入集逐条吻合，
+> `Software` 直接写着 `dcraw v9.26`，没有 MakerNote / LensModel / DateTimeOriginal。
+> 交叉验证：`dcrawMakeMemThumb().data_size - getThumbnail().tlength = 1386`，正好一整条 APP1 段。
+> ⇒ **「从内嵌预览原样提取原 EXIF」这条路对本样本不成立**；改走容器自身的 IFD0/ExifIFD
+> （DNG 是 TIFF，`ExifOffset` 直接挂着完整拍摄信息）。本节其余内容作为 LibRaw 行为的描述仍然
+> 有效，但不要据此假设任意一份 RAW 的预览都带原块——那需要逐份实测。
+
 **Uncertainties in A1 (stated, not papered over):**
 
 - I could not locate the definition of `LibRaw::unpack_thumb()` itself. It is not in

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ImageRenderer } from '../renderer/ImageRenderer';
+import { attachRawExif, EXIF_TAG, readTiffExifTags } from './exif';
 import {
   computeExportSize,
   downloadBlob,
@@ -130,7 +131,35 @@ describe('formatBytes', () => {
 });
 
 describe('renderExport', () => {
-  /** jsdom 没有 OffscreenCanvas，用一个只会回一块 Blob 的替身顶上 */
+  /** 最小 JPEG：SOI + SOS + 一点数据 */
+  const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0x00, 0x08, 1, 2, 3, 4, 5, 6]);
+
+  /** 最小 PNG：签名 + IHDR + IDAT + IEND */
+  function pngBytes(): Uint8Array {
+    const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const pieces: number[][] = [signature];
+    for (const [type, length] of [
+      ['IHDR', 13],
+      ['IDAT', 8],
+      ['IEND', 0],
+    ] as Array<[string, number]>) {
+      pieces.push([
+        (length >> 24) & 0xff,
+        (length >> 16) & 0xff,
+        (length >> 8) & 0xff,
+        length & 0xff,
+        ...[...type].map((char) => char.charCodeAt(0)),
+        ...new Array<number>(length).fill(0),
+        0,
+        0,
+        0,
+        0,
+      ]);
+    }
+    return new Uint8Array(pieces.flat());
+  }
+
+  /** jsdom 没有 OffscreenCanvas，用一个会按 MIME 类型回真实字节的替身顶上 */
   class FakeOffscreenCanvas {
     constructor(
       readonly width: number,
@@ -142,7 +171,8 @@ describe('renderExport', () => {
     }
 
     async convertToBlob(options: { type: string }): Promise<Blob> {
-      return new Blob(['pixels'], { type: options.type });
+      const bytes = options.type === 'image/png' ? pngBytes() : JPEG_BYTES;
+      return new Blob([bytes], { type: options.type });
     }
   }
 
@@ -162,6 +192,50 @@ describe('renderExport', () => {
       ),
       setLogMode: vi.fn(),
     };
+  }
+
+  /** 一份照着 IMGP2971.DNG 实测结构造的最小 TIFF 容器 */
+  function makeContainer(): Uint8Array {
+    const ifd0At = 8;
+    // IFD0 两条：Make + ExifOffset
+    const ifd0Size = 2 + 2 * 12 + 4;
+    const exifAt = ifd0At + ifd0Size;
+    const exifSize = 2 + 1 * 12 + 4;
+    let valueAt = exifAt + exifSize;
+    if (valueAt % 2 === 1) valueAt += 1;
+
+    const make = new Uint8Array([0x50, 0x45, 0x4e, 0x54, 0x41, 0x58, 0x00]); // "PENTAX\0"
+    const makeAt = valueAt;
+    valueAt += make.length;
+    if (valueAt % 2 === 1) valueAt += 1;
+
+    const out = new Uint8Array(valueAt);
+    const view = new DataView(out.buffer);
+    out[0] = 0x49;
+    out[1] = 0x49;
+    view.setUint16(2, 42, true);
+    view.setUint32(4, ifd0At, true);
+
+    view.setUint16(ifd0At, 2, true);
+    view.setUint16(ifd0At + 2, 0x010f, true); // Make
+    view.setUint16(ifd0At + 4, 2, true); // ASCII
+    view.setUint32(ifd0At + 6, make.length, true);
+    view.setUint32(ifd0At + 10, makeAt, true);
+    view.setUint16(ifd0At + 14, 0x8769, true); // ExifOffset
+    view.setUint16(ifd0At + 16, 4, true); // LONG
+    view.setUint32(ifd0At + 18, 1, true);
+    view.setUint32(ifd0At + 22, exifAt, true);
+    view.setUint32(ifd0At + 26, 0, true); // 没有 IFD1
+
+    view.setUint16(exifAt, 1, true);
+    view.setUint16(exifAt + 2, 0x8827, true); // ISO
+    view.setUint16(exifAt + 4, 3, true); // SHORT
+    view.setUint32(exifAt + 6, 1, true);
+    view.setUint16(exifAt + 10, 100, true);
+    view.setUint32(exifAt + 14, 0, true);
+
+    out.set(make, makeAt);
+    return out;
   }
 
   afterEach(() => {
@@ -212,6 +286,98 @@ describe('renderExport', () => {
     });
 
     expect(renderer.setLogMode).not.toHaveBeenCalled();
+  });
+
+  it('给了来源就把原拍摄 EXIF 注进去', async () => {
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    const renderer = makeRenderer();
+
+    const result = await renderExport(renderer as unknown as ImageRenderer, 'shot.cr2', {
+      format: 'jpeg',
+      quality: 0.9,
+      maxLongEdge: 3000,
+      exif: { containerBytes: makeContainer(), fallback: null },
+    });
+
+    expect(result.exifStatus).toBe('attached');
+    const bytes = new Uint8Array(await result.blob.arrayBuffer());
+    // SOI 之后就是 APP1，长度字段非 0
+    expect(Array.from(bytes.subarray(0, 4))).toEqual([0xff, 0xd8, 0xff, 0xe1]);
+    expect((bytes[4] << 8) | bytes[5]).toBeGreaterThan(8);
+    // "Exif\0\0"
+    expect(Array.from(bytes.subarray(6, 12))).toEqual([0x45, 0x78, 0x69, 0x66, 0, 0]);
+    expect(bytes.length).toBeGreaterThan(JPEG_BYTES.length);
+  });
+
+  it('EXIF 的像素尺寸按导出尺寸写，不是原图尺寸', async () => {
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    const renderer = makeRenderer();
+
+    const result = await renderExport(renderer as unknown as ImageRenderer, 'shot.cr2', {
+      format: 'jpeg',
+      quality: 0.9,
+      maxLongEdge: 3000,
+      exif: { containerBytes: makeContainer(), fallback: null },
+    });
+
+    const bytes = new Uint8Array(await result.blob.arrayBuffer());
+    // APP1 载荷：FFE1 + 长度 + "Exif\0\0" + TIFF 块
+    const tags = readTiffExifTags(bytes.subarray(12))!;
+    const width = tags.exif.find((entry) => entry.tag === EXIF_TAG.PixelXDimension)!;
+    const height = tags.exif.find((entry) => entry.tag === EXIF_TAG.PixelYDimension)!;
+    const read = (data: Uint8Array) =>
+      new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0, true);
+
+    expect(read(width.data)).toBe(3000);
+    expect(read(height.data)).toBe(2000);
+  });
+
+  it('没有来源时报 unavailable，字节与编码结果一模一样', async () => {
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    const renderer = makeRenderer();
+
+    const result = await renderExport(renderer as unknown as ImageRenderer, 'shot.cr2', {
+      format: 'jpeg',
+      quality: 0.9,
+      maxLongEdge: null,
+    });
+
+    expect(result.exifStatus).toBe('unavailable');
+    const bytes = new Uint8Array(await result.blob.arrayBuffer());
+    expect(Array.from(bytes)).toEqual(Array.from(JPEG_BYTES));
+  });
+
+  it('WebP 报 unsupported，落盘的还是编码器那份字节', async () => {
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    const renderer = makeRenderer();
+
+    const result = await renderExport(renderer as unknown as ImageRenderer, 'shot.cr2', {
+      format: 'webp',
+      quality: 0.9,
+      maxLongEdge: null,
+      exif: { containerBytes: makeContainer(), fallback: { make: 'Canon' } },
+    });
+
+    expect(result.exifStatus).toBe('unsupported');
+    expect(new Uint8Array(await result.blob.arrayBuffer()).length).toBe(JPEG_BYTES.length);
+  });
+});
+
+describe('EXPORT_FORMATS 的 carriesExif', () => {
+  /**
+   * 面板的标注（`carriesExif`）与真正写不写（`attachRawExif`）是两处声明，
+   * 一旦说岔了用户就会看到「会带 EXIF」而文件里没有。这里把它们钉在一起。
+   */
+  it('与 attachRawExif 的实际行为一致', () => {
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0x00, 0x08, 1, 2, 3, 4, 5, 6]);
+    const source = { fallback: { make: 'Canon' } };
+
+    for (const info of EXPORT_FORMATS) {
+      const { status } = attachRawExif(bytes, info.id, source, { width: 10, height: 10 });
+      expect(status === 'unsupported', `${info.id} 的 carriesExif 与实际行为不一致`).toBe(
+        !info.carriesExif,
+      );
+    }
   });
 });
 

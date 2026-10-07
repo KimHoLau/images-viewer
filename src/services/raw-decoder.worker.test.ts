@@ -81,10 +81,31 @@ vi.mock('@colorhythm/libraw-wasm', () => {
         model: 'EOS R5',
         normalized_make: 'Canon',
         normalized_model: 'EOS R5',
+        // LibRaw 的字符串字段带定长填充，worker 要把它去掉
+        software: 'EOS R5 Firmware 1.9.0      ',
       };
     }
     getImgOther() {
-      return { iso_speed: 400, shutter: 0.005, aperture: 2.8, focal_len: 35, timestamp: 0n };
+      return {
+        iso_speed: 400,
+        shutter: 0.005,
+        aperture: 2.8,
+        focal_len: 35,
+        timestamp: 1791177388n,
+        artist: 'KIMHO   ',
+        desc: '',
+      };
+    }
+    getLensInfo() {
+      return {
+        Lens: 'RF24-70mm F2.8 L IS USM',
+        LensMake: 'Canon',
+        LensSerial: 'LS0001',
+        FocalLengthIn35mmFormat: 35,
+      };
+    }
+    getShootingInfo() {
+      return { BodySerial: 'SN123456' };
     }
     dispose(): void {
       calls.push('dispose');
@@ -161,6 +182,35 @@ describe('raw-decoder.worker', () => {
     // RGB 三元组被补成 RGBA
     expect(Array.from(message.pixels)).toEqual([255, 0, 0, 255, 0, 255, 0, 255]);
     expect(message.metadata).toMatchObject({ make: 'Canon', model: 'EOS R5', iso: 400 });
+  });
+
+  it('把导出 EXIF 兜底需要的字段一起取出来', async () => {
+    await handler()({
+      data: { id: 7, buffer: new ArrayBuffer(8), fileName: 'shot.cr2', options: {} },
+    });
+
+    const [message] = fakeSelf.postMessage.mock.calls[0];
+
+    expect(message.metadata).toMatchObject({
+      // 定长填充被去掉
+      software: 'EOS R5 Firmware 1.9.0',
+      artist: 'KIMHO',
+      description: '',
+      lensModel: 'RF24-70mm F2.8 L IS USM',
+      lensMake: 'Canon',
+      lensSerial: 'LS0001',
+      bodySerial: 'SN123456',
+      focalLength35mm: 35,
+    });
+  });
+
+  it('timestamp 从 LibRaw 的秒统一成毫秒', async () => {
+    await handler()({
+      data: { id: 7, buffer: new ArrayBuffer(8), fileName: 'shot.cr2', options: {} },
+    });
+
+    const [message] = fakeSelf.postMessage.mock.calls[0];
+    expect(message.metadata.timestamp).toBe(1791177388000);
   });
 
   it('transfers the pixel buffer instead of copying it', async () => {

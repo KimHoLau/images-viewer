@@ -1,5 +1,7 @@
 import { useCallback, useState } from 'react';
 import { getActiveRenderer } from '../renderer/renderer-registry';
+import { collectRawExifSource, toExifFallback, type ExifAttachStatus } from '../services/exif';
+import type { RawMetadata } from '../services/raw-decoder.worker';
 import {
   DEFAULT_EXPORT_QUALITY,
   EXPORT_FORMATS,
@@ -19,12 +21,52 @@ function longEdgeLabel(longEdge: number | null): string {
   return longEdge === null ? '原始尺寸' : `长边 ${longEdge}`;
 }
 
-export function ExportPanel() {
+/**
+ * 导出结果里关于 EXIF 的那一句。
+ *
+ * `kept` 为 false 是用户自己把「保留拍摄信息」关掉了——那要说「按你的设置没写」，
+ * 不能拿「源文件里没有」去糊弄。
+ * `unavailable` 则确实是没有可保留的信息，不是静默丢掉。
+ * 非 RAW 源压根不参与这件事，调用方不会问到这里来。
+ */
+function exifNote(status: ExifAttachStatus, kept: boolean): string {
+  if (!kept) return ' · 未写入拍摄信息（已关闭保留）';
+
+  switch (status) {
+    case 'attached':
+      return ' · 已带上原拍摄 EXIF';
+    case 'unsupported':
+      return ' · 该格式不写入 EXIF';
+    case 'failed':
+      return ' · EXIF 写入失败，图片本身正常';
+    case 'unavailable':
+      return ' · 源文件里没有可保留的拍摄信息';
+    default: {
+      // 多出一种状态时必须在这里补上一句话，否则下面这行编译不过
+      const unhandled: never = status;
+      return unhandled;
+    }
+  }
+}
+
+export interface ExportPanelProps {
+  /** 当前图片的 RAW 拍摄信息，作为导出 EXIF 的兜底来源 */
+  metadata?: RawMetadata | null;
+}
+
+export function ExportPanel({ metadata = null }: ExportPanelProps) {
   const entry = useAppStore(selectCurrentImage);
 
   const [format, setFormat] = useState<ExportFormat>('jpeg');
   const [quality, setQuality] = useState(DEFAULT_EXPORT_QUALITY);
   const [maxLongEdge, setMaxLongEdge] = useState<number | null>(null);
+  /**
+   * 要不要把原拍摄信息写进导出文件。
+   *
+   * 默认开——需求就是「导出的文件带上拍摄信息」。留这个开关是为了让用户能主动导出
+   * 一份干净的图（发到网上不必带上机身序列号这类东西），而不是替他决定。
+   */
+  const [keepExif, setKeepExif] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -57,17 +99,28 @@ export function ExportPanel() {
     setBusy(true);
     setMessage(null);
     try {
-      const result = await renderExport(renderer, entry.name, { format, quality, maxLongEdge });
+      // 只有 RAW 源才谈得上「保留原拍摄 EXIF」：常规格式的源不在需求范围内
+      const exif =
+        entry.isRaw && keepExif
+          ? await collectRawExifSource(entry.file, toExifFallback(metadata))
+          : null;
+      const result = await renderExport(renderer, entry.name, {
+        format,
+        quality,
+        maxLongEdge,
+        exif,
+      });
       downloadBlob(result.blob, result.fileName);
       setMessage(
-        `已导出 ${result.fileName}（${result.width}×${result.height}，${formatBytes(result.blob.size)}）`,
+        `已导出 ${result.fileName}（${result.width}×${result.height}，${formatBytes(result.blob.size)}）` +
+          (entry.isRaw ? exifNote(result.exifStatus, keepExif) : ''),
       );
     } catch (error) {
       setMessage(`导出失败：${(error as Error).message}`);
     } finally {
       setBusy(false);
     }
-  }, [entry, format, quality, maxLongEdge]);
+  }, [entry, format, quality, maxLongEdge, metadata, keepExif]);
 
   const disabled = !entry || busy;
 
@@ -125,6 +178,24 @@ export function ExportPanel() {
           ? `输出 ${estimatedSize.width} × ${estimatedSize.height}`
           : '打开图片后可导出'}
       </div>
+
+      {entry?.isRaw ? (
+        <label className="field field--check">
+          <input
+            type="checkbox"
+            checked={keepExif}
+            disabled={disabled}
+            onChange={(event) => setKeepExif(event.target.checked)}
+          />
+          <span>保留拍摄信息（EXIF）</span>
+        </label>
+      ) : null}
+
+      {entry?.isRaw && keepExif && !formatInfo.carriesExif ? (
+        <p className="panel-hint">
+          {formatInfo.label} 不写入 EXIF，需要保留拍摄信息请选 JPEG 或 PNG
+        </p>
+      ) : null}
 
       <button
         type="button"

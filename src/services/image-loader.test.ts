@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { makeFileEntry } from '../test/fixtures';
+import { makeFileEntry, makeRawMetadata } from '../test/fixtures';
 import { ImageLoader, releaseLoadedImage, type LoadedImage } from './image-loader';
 
 const { decode } = vi.hoisted(() => ({ decode: vi.fn() }));
@@ -11,18 +11,7 @@ vi.mock('./raw-decoder-service', () => ({
   },
 }));
 
-const metadata = {
-  width: 6000,
-  height: 4000,
-  make: 'Canon',
-  model: 'EOS R5',
-  colors: 3,
-  iso: 400,
-  shutter: 0.005,
-  aperture: 2.8,
-  focalLength: 35,
-  timestamp: 0,
-};
+const metadata = makeRawMetadata();
 
 /** 造一个可识别的位图替身，用来断言纹理来源 */
 function fakeBitmap(width = 6000, height = 4000) {

@@ -2,19 +2,33 @@
 import { LibRaw } from '@colorhythm/libraw-wasm';
 import { bitmap16ToFloatRgb, bitmapToRgba } from './pixel-utils';
 import { createLibRawDecoder } from './libraw-loader';
+import { buildRawMetadata } from './raw-metadata';
 
-/** RAW 文件的拍摄信息，显示在右侧信息面板 */
+/** RAW 文件的拍摄信息，显示在右侧信息面板，同时作为导出 EXIF 的兜底来源 */
 export interface RawMetadata {
   width: number;
   height: number;
   make: string;
   model: string;
+  /** 相机固件/软件标识，导出 EXIF 的 `Software` 就取它（G1：保留原值，不写工具名） */
+  software: string;
+  /** 作者 / 版权信息，导出 EXIF 的 `Artist` */
+  artist: string;
+  /** 图像描述，导出 EXIF 的 `ImageDescription` */
+  description: string;
+  lensModel: string;
+  lensMake: string;
+  lensSerial: string;
+  /** 机身序列号 */
+  bodySerial: string;
   colors: number;
   iso: number;
   /** 快门速度，单位秒 */
   shutter: number;
   aperture: number;
   focalLength: number;
+  /** 35mm 等效焦距 */
+  focalLength35mm: number;
   /** 拍摄时间戳（毫秒），无法解析时为 0 */
   timestamp: number;
 }
@@ -120,6 +134,8 @@ function decode(request: RawDecodeRequest, decoder: LibRaw): DecodedRawResult {
   const image = decoder.dcrawMakeMemImage();
   const params = decoder.getIParams();
   const other = decoder.getImgOther();
+  const lens = decoder.getLensInfo();
+  const shooting = decoder.getShootingInfo();
 
   const pixelData = linearProPhoto
     ? {
@@ -131,19 +147,13 @@ function decode(request: RawDecodeRequest, decoder: LibRaw): DecodedRawResult {
         pixels: bitmapToRgba(image.data, image.width, image.height, image.colors),
       };
 
-  const metadata: RawMetadata = {
-    width: image.width,
-    height: image.height,
-    make: params.normalized_make || params.make || '',
-    model: params.normalized_model || params.model || '',
-    colors: image.colors,
-    iso: Number(other.iso_speed) || 0,
-    shutter: Number(other.shutter) || 0,
-    aperture: Number(other.aperture) || 0,
-    focalLength: Number(other.focal_len) || 0,
-    // LibRaw 的 timestamp 是 bigint，转成毫秒数字
-    timestamp: Number(other.timestamp) || 0,
-  };
+  const metadata: RawMetadata = buildRawMetadata({
+    params,
+    other,
+    lens,
+    shooting,
+    image: { width: image.width, height: image.height, colors: image.colors },
+  });
 
   return {
     id,
