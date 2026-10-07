@@ -101,3 +101,46 @@ jobs:
             gh release create $tag --draft --title $tag --notes-file release/release-notes.md --verify-tag
           }
           gh release upload $tag @assets --clobber
+
+      # `gh release upload` 退出码为 0 只说明「命令没报错」，不说明资产真的挂上了：
+      # 实测撞到过 draft 页面上既不列资产、也点不动的情况（资产其实在服务器上，
+      # 是 GitHub 页面侧渲染延迟）。所以上传之后必须回读一次，让「传没传上去」
+      # 变成一个机器判定，而不是靠人去页面上看。
+      - name: 回读校验三个资产真的挂上了
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = if ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          # 期望清单：本地那份产物的文件名与字节数，逐个核对
+          $expected = @{}
+          foreach ($f in (Get-ChildItem release -File | Where-Object { $_.Extension -in '.exe', '.zip' })) {
+            $expected[$f.Name] = $f.Length
+          }
+          $expected['SHA256SUMS.txt'] = (Get-Item release/SHA256SUMS.txt).Length
+          "期望 $($expected.Count) 个资产："
+          foreach ($k in $expected.Keys) { "  $k  $($expected[$k]) B" }
+
+          # 轮询：GitHub 的资产注册与页面渲染都可能滞后，给 60 秒
+          $deadline = (Get-Date).AddSeconds(60)
+          do {
+            $json = gh release view $tag --json assets | ConvertFrom-Json
+            $remote = @{}
+            foreach ($a in $json.assets) { $remote[$a.name] = $a.size }
+            $problems = @()
+            foreach ($k in $expected.Keys) {
+              if (-not $remote.ContainsKey($k)) { $problems += "缺资产：$k" }
+              elseif ([int64]$remote[$k] -ne [int64]$expected[$k]) { $problems += "$k 体积不符：期望 $($expected[$k])，实际 $($remote[$k])" }
+            }
+            foreach ($k in $remote.Keys) { if (-not $expected.ContainsKey($k)) { $problems += "多出非预期资产：$k" } }
+            if ($problems.Count -eq 0) { break }
+            Start-Sleep -Seconds 5
+          } while ((Get-Date) -lt $deadline)
+
+          if ($problems.Count -ne 0) {
+            foreach ($p in $problems) { Write-Output "PROBLEM: $p" }
+            Write-Error "资产回读校验未通过（等了 60 秒）：$($problems -join ' / ')"
+            exit 1
+          }
+          "回读校验通过，Release $tag 上现在有 $($remote.Count) 个资产："
+          foreach ($k in $remote.Keys) { "  $k  $($remote[$k]) B" }
