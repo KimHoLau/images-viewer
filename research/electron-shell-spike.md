@@ -2,7 +2,9 @@
 
 **问题**：网页版依赖的那几组浏览器能力，在 Electron 壳里是否还成立 —— 自定义 scheme 下的取数、`.cube.gz` 解压、ES module Worker + LibRAW WASM、WebGL2 浮点纹理、打开相册的两条路径、导出落盘。**必测项含中文路径**。
 
-**答案**：**成立，没有一处需要改产品代码**；要适配的是「打包与协议配方」，一共 6 条，全部记在第 4 节。**但其中 5 条只在浏览器里拿到了实测证据，壳内的那一遍没能在这台机器上跑完** —— 原因与剩下的验证动作记在第 2.2 节，请当成这张票的未完成项看待。
+**答案**：**成立，没有一处需要改产品代码**；要适配的是「打包与协议配方」，一共 6 条，全部记在第 4 节。**浏览器基线与壳内两遍现在都跑完了** —— 壳内 **16 项通过 / 0 项需适配 / 2 项人工 / 3 项未跑**（共 21 项）。
+
+**两遍之间唯一那处「壳内拿不到数据」的原因，最后查明是探针自己的 bug**：`progress()` 把「开始/完成 xxx」POST 到与最终证据**同一个** `__spike/result`，而 `main.cjs` 的 `handleResultPost` 既忽略 `?out=` 参数、又在**任何**一次 POST 之后 `app.quit()`。于是第一次进度上报就把进程退掉、把最终证据覆盖成 27 字节的进度文本。这条一直没被发现，是因为在它之前还有一道更早的墙（见 2.2）。**这是本票要老实记下的一件事：§2.1 的浏览器基线之所以拿得到数字，是因为 `serve.cjs` 那条路不走这个补丁；壳内那条路一直坏着。** 修法写在 2.3。
 
 - 探针（抛弃式原型）：`spike/electron-shell/`，页面本身是 [`spike/electron-shell/shell-spike.html`](https://github.com/KimHoLau/raw-images-studio/blob/spike/issue-41-electron-shell/spike/electron-shell/shell-spike.html) + [`src/dev/shell-spike-probe.ts`](https://github.com/KimHoLau/raw-images-studio/blob/spike/issue-41-electron-shell/src/dev/shell-spike-probe.ts)
 - 抛弃式分支：`spike/issue-41-electron-shell`（main 上只留这份文档）
@@ -52,32 +54,69 @@ npm run selftest:relative     # base='./' 的产物再跑一遍
 - `worker.module` 第一轮失败：blob worker 里的 `import ... from './shell-spike-helper'` 少了扩展名，Chromium 解析不了，而且 `worker.onerror` **一个字的文案都不给**。
 - `worker.wasm` 第一轮失败：`import.meta.resolve('@colorhythm/libraw-wasm/libraw.wasm')` 在 Chrome 154 里**原样返回 bare specifier**；改成 Vite 的 `?url` 资源管线 + 在页面里先 `new URL(...)` 解析成绝对地址才通。
 
-### 2.2 壳内那一遍：**没跑完**，这是本票的未完成项
+### 2.2 壳内那一遍：**跑完了**（16 通过 / 0 需适配 / 2 人工 / 3 未跑）
 
-Electron 44.6.0 装上了、二进制能起（`electron.exe --version` → `v44.6.0`），但这个 DSH 会话的 Windows 沙箱里**建不出浏览器窗口**：主进程脚本能跑到 `app.whenReady()`，一建 `BrowserWindow` 进程就以 `0x80000003` 退出，页面永远到不了 `did-finish-load`，探针因此没机会跑。这不是 Electron 的问题，是本机环境的限制（同一份代码在真机上由第 2.3 节的命令验证）。
+Electron 44.6.0 / Chromium 152 / Windows，`app://bundle`，原始证据在 `spike/electron-shell/out/selftest.json`。几处有分量的实测值：
 
-顺带撞出两条**真机上也值得知道的**环境事实（第 4 节 B1 / B2）。
+| 项 | 实测 |
+| --- | --- |
+| 自定义 scheme 下的安全上下文 | `app://bundle/`，`isSecureContext: true` |
+| `fetch` 三种路径形态（相对 / 根绝对 / 写死完整） | 全通，各 2,911,296 B → 解压 9,062,640 字符、`LUT_3D_SIZE 65` |
+| 中文路径取数 | 3,376,735 B → 解压出 `LUT_3D_SIZE 65` |
+| `Content-Encoding` 陷阱（壳内形态） | 协议层**不**解这一层，拿到的是 gzip 字节，`isGzip()` 兜底吃住 |
+| module worker / libraw.wasm | 均通；wasm 853,083 B，需 `["a"]` 提供 **43 条 import** |
+| 中文目录 + 中文文件名的 RAW 解码 | 2468×1636，Pentax K-30，705 ms，`rgba8` |
+| WebGL2 / `RGB16F` / `RGBA16F` | 全通；真 GPU：ANGLE（AMD Radeon / D3D11），`MAX_TEXTURE_SIZE 16384` |
+| IndexedDB | 开库 / 写 / 读全通 |
+| 导出 | `<a download="导出测试-中文名-1024x768.jpg">` 触发成功，1210 B |
 
-### 2.3 请在真机上补跑（一条命令）
+**跑通需要两个前提，两个都是本机环境的、不是产品的**（真机不需要第一条）：
+
+1. **必须加 `--no-sandbox`**：否则进程在建 `BrowserWindow` 时以 `0x80000003` 退出（`FATAL:mojo … platform_channel.cc:108 Check failed: . : 拒绝访问`）。**注意这不是「命名管道被禁」那个原因**——本会话后来实测命名管道是通的（`listen OK | connect OK`），建不出来的是 Chromium 的 OS 级沙箱（本会话的进程令牌办不到）。代价：16 项里只有 `showDirectoryPicker` 可能受它影响，而那一项**本来就被自动跑跳过**（会弹系统对话框），所以这次自动跑没有损失证据。
+2. **`--user-data-dir` 指到工作区内**：否则写 profile 时直接崩（第 4 节 B1）。
+
+**并且要先修掉探针自己的一个 bug**：`main.cjs` 的 `handleResultPost` 必须认 `?out=` 参数，并且**只在收到最终证据时**才 `app.quit()`。修法见 2.3。
+
+### 2.3 怎么复跑（含必须先打的那个补丁）
+
+**补丁（`main.cjs` 的 `handleResultPost`）**：把落盘路径从 `?out=` 查询参数读出来（页面把进度写成 `<out>.progress`、把最终证据写成 `<out>`），并且**只在非 `.progress` 的那一次 POST 之后**才 `setTimeout(() => app.quit(), …)`；同时 `loadURL` 的 query 里要把 `out=out/selftest.json` 一并交给页面。不打这个补丁，`npm run selftest` 永远只会留下 27 字节的进度文本。
 
 ```powershell
 cd spike/electron-shell
-npm install            # electron 44.6.0，约 150 MB（国内网络用 ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/）
-npm run selftest       # 结果落到 out/selftest.json
-npm run selftest:nogpu # 对比渲染器字符串；再顺手断网启动一次，做手动那两项
+npm install              # electron 44.6.0，约 150 MB（国内网络用 ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/）
+# 打上上面那个 handleResultPost 补丁，然后：
+node ../../node_modules/vite/bin/vite.js build --config vite.spike.config.ts
+& .\node_modules\electron\dist\electron.exe . --spike-autorun --spike-out=./out/selftest.json `
+    --user-data-dir=<工作区内的路径> --no-sandbox
 ```
 
-`out/selftest.json` 与本文档第 5 节的表是同一个结构，把它的 `summary` 与各项 `conclusion` 对回来即可。**注意：如果不加 `--no-sandbox`**（`main.cjs` 默认不加），`showDirectoryPicker` 那一项的结论才代表产品真实形态。
+两个变体：
+
+```powershell
+# 1) 关掉硬件加速，对比渲染器字符串
+& .\node_modules\electron\dist\electron.exe . --spike-autorun --spike-no-gpu --spike-out=./out/selftest-nogpu.json `
+    --user-data-dir=<工作区内的路径> --no-sandbox
+
+# 2) base='./' 的产物
+$env:VITE_SPIKE_BASE = './'
+node ../../node_modules/vite/bin/vite.js build --config vite.spike.config.ts
+& .\node_modules\electron\dist\electron.exe . --spike-autorun --spike-base=./ --spike-out=./out/selftest-base-relative.json `
+    --user-data-dir=<工作区内的路径> --no-sandbox
+```
+
+**`base='./'` 那一轮是 15 通过 / 1 失败**，唯一的失败项是 `asset.fetch-root`（「根绝对」那种形态在 `./` 下本来就不适用）。也就是说**两种 base 都能用**；spec 钉 `base='/'` 是因为它三种形态全通。
+
+两个操作上的坑：`Start-Process` 起 Electron 时要靠 `-RedirectStandardOutput` 收 stdout（GUI 子系统进程没有控制台，直接跑看不到任何输出），而且**进程有时写完结果也不退出**——轮询结果文件、拿到了就 `Kill()` 更可靠。
 
 ## 3. 判定表：逐项「成立 / 要适配」
 
 | 必测项（调研第 8 节编号） | 判定 | 依据 |
 | --- | --- | --- |
-| 1 自定义 scheme 下 `fetch` + `import.meta.glob` 的路径形态 | **成立（待壳内确认）** | 浏览器里三种形态全通；`app://` 侧只有配方要配（第 4 节 A3） |
-| 2 `showDirectoryPicker` + 用户取消是否可区分 | **倾向成立（未实测）** | `typeof` 在 Chrome 里是 `function`；无手势时抛 `DOMException SecurityError`（code 18），与 `AbortError` 名字不同、可区分。**壳内一次性授权必须真机点一次** |
+| 1 自定义 scheme 下 `fetch` + `import.meta.glob` 的路径形态 | **成立（壳内实测）** | 壳内三种形态全通（各 2,911,296 B → 解压 9,062,640 字符）；中文路径也通；`base='./'` 只差「根绝对」那一形态 |
+| 2 `showDirectoryPicker` + 用户取消是否可区分 | **倾向成立（壳内仍未实测）** | 自动跑一律跳过会弹系统对话框的项。无手势时抛 `DOMException SecurityError`（code 18），与 `AbortError` 名字不同、可区分 —— 但这只有文档级依据，**必须真人点一次** |
 | 3 ES module Worker + WASM + `DecompressionStream` 全链路 | **成立** | 真 `raw-decoder.worker` + `libraw.wasm` + 中文路径 RAW 解码实测通 |
-| 4 体积与产物实测 | **部分：只有本机数字，没真出包** | Electron 44.6.0 解包 **367.6 MB**（`electron.exe` 234.8 MB），`dist/` **87.9 MB**（其中 34 个 `.cube.gz` 共 48.2 MB）。NSIS 装压缩流，**≤250 MB 的软目标落在范围内**；真 NSIS/zip 数字归发版链路票 |
-| 5 无 GPU / 远程桌面下的 WebGL2 | **成立（软渲染下）** | SwiftShader 下 WebGL2 + RGB16F/RGBA16F 全通 —— 说明「没有 GPU 也能起来」，只是慢 |
+| 4 体积与产物实测 | **一半成立：zip 实测到手，NSIS 未产出** | 真 `npm run build` 的 `dist/` = **51,890,398 B（49.49 MiB）**、40 个文件；`win-unpacked/` = 437,458,399 B；**便携 zip = 204,064,446 B（194.61 MiB）**，在 250 MB 软目标内（余约 55 MiB）。**NSIS 安装包未产出**：本环境里任何 NSIS 安装器都执行不了（手写极简 `.nsi` 的 `SetErrorLevel 42; Quit` 返回 2），而 electron-builder 生成卸载器必须真跑一次安装器 ⇒ 真实字节数**未测得，不写估算**。详见 [发版事实调研](electron-builder-release-facts.md) 与 [spec](../../docs/spec-windows-installer.md) 5.5.1 |
+| 5 无 GPU / 远程桌面下的 WebGL2 | **本机跑挂，间接成立** | 本机 `--spike-no-gpu` 变体两次都挂住不出结果；网页版基线在 SwiftShader 软渲染下 WebGL2 + `RGB16F`/`RGBA16F` 全通，壳内在真 GPU（AMD / D3D11）上也全通 |
 | 6 离线机器首次启动不偷偷联网 | **未实测（需人工）** | 探针留了结论位；壳本身不下载任何东西，但这件事只有断网启动一次才算数 |
 | 7–11 Tauri 侧 | **不做** | ADR 已定 Electron，且「改主意」的三条触发条件一条都没被触发 |
 
@@ -95,7 +134,7 @@ npm run selftest:nogpu # 对比渲染器字符串；再顺手断网启动一次�
 ### B. 本机环境（真机上也值得知道）
 
 - **B1 · 受限环境里 Electron 写 profile 会直接崩。** 在 DSH 沙箱里 `%LOCALAPPDATA%` 不可写，Electron 建窗口时以 `0x80000003` 退出，且**任何日志都没有**；实证：同一个脚本加上 `--user-data-dir=<工作区路径>` 就能跑到 `app.quit()`。`main.cjs` 因此加了 `--spike-userdata=` 开关。
-- **B2 · 本环境还必须 `--no-sandbox`。** 不加就直接崩。**代价要说清**：`--no-sandbox` 关掉的是 Chromium 的 OS 级渲染进程沙箱，`showDirectoryPicker` 的权限路径可能因此与产品真实形态不同 —— **真机验证请不加这个开关**，只有受限环境才用。
+- **B2 · 本环境还必须 `--no-sandbox`。** 不加就直接崩。**根因要说准**：不是「命名管道被禁」——本会话后来实测命名管道是通的（`listen OK | connect OK`），建不出来的是 **Chromium 的 OS 级沙箱**（本会话的进程令牌办不到）。**代价要说清**：`--no-sandbox` 关掉的是那层 OS 沙箱，`showDirectoryPicker` 的权限路径可能因此与产品真实形态不同 —— **真机验证请不加这个开关**，只有受限环境才用。
 - **B3 · 无头浏览器 + `--virtual-time-budget` 会把「等待」压成瞬间，还会在预算耗尽后冻结页面。** 第一轮用 `--dump-dom --virtual-time-budget=240000` 跑，10 秒/20 秒的超时被瞬间烧掉、页面在第 10 项左右被冻住，看起来像「探针卡死」。改成**真实时间等待 + 轮询结果文件**才拿到完整的一轮。
 
 ### C. 中文路径（票面点名的必测项）
@@ -110,19 +149,23 @@ npm run selftest:nogpu # 对比渲染器字符串；再顺手断网启动一次�
 
 ## 5. 还没被证明的部分（别当结论用）
 
-1. **壳内那一遍的全部数字** —— 本机建不出窗口（第 2.2 节）。`app://` 下 `fetch` 相对路径的解析起点、`DecompressionStream`、module worker、IndexedDB 在自定义 scheme 下**是不是真的都通**，只有第 2.3 节那条命令的 `out/selftest.json` 能回答。
-2. **`showDirectoryPicker` 的一次性授权与取消可区分性** —— 需要真人点一次；自动跑一律跳过（它会弹系统对话框）。
-3. **导出落盘的真实目标** —— 探针触发了下载并记下文件名，但「落到哪、名字有没有乱码」只有人能在自己的机器上看。壳里若没有下载 UI，这是最可能出意外的一项。
-4. **断网首次启动**、**远程桌面/无 GPU 真机上的 WebGL2** —— 两处人工项。
-5. **NSIS / zip 的真实体积** —— 只有解包数字（367.6 MB + 87.9 MB），压缩后多少要看 `electron-builder` 实际出包（归发版链路票）。
-6. **`electron-builder` 在不签名时是否会联网下 `winCodeSign`** —— 调研第 8 节第 4 条列的问题，本票没碰。
+§2.2 那一轮之后，原来的六条里有两条落定了，剩下的范围也缩小了：
+
+1. ~~**壳内那一遍的全部数字**~~ —— **已落定**（第 2.2 节：16 通过 / 0 需适配 / 2 人工）。自动跑唯一没覆盖到的是 `showDirectoryPicker` 与 `input webkitdirectory` 两项。
+2. **`showDirectoryPicker` 的一次性授权与取消可区分性** —— 需要真人点一次；自动跑一律跳过（它会弹系统对话框）。**这是本票唯一还缺的必测项。**
+3. **导出落盘的真实目标** —— 探针触发了下载并记下了文件名与字节数，但「落到哪、名字有没有乱码」只有人能在自己的机器上看。壳里没有自定义下载 UI，这是最可能出意外的一项。
+4. **断网首次启动** —— 两条旁证：把 HTTP(S) 全导到一个死代理后判定表**逐项不变**；Chromium netlog 里 **0 条 `http(s)` URL**。但真正拔网线启动一次仍需人肉。
+5. **远程桌面 / 无 GPU 真机上的 WebGL2** —— 本机 `--spike-no-gpu` 变体**跑挂了**（两次都挂住不出结果）。间接证据：网页版基线在 SwiftShader 软渲染下 WebGL2 + `RGB16F`/`RGBA16F` 全通，壳内在真 GPU（AMD / D3D11）上也全通。
+6. **NSIS / zip 的真实体积**，以及 7. **不签名时 `electron-builder` 会不会下 `winCodeSign`** —— 归发版链路票。后者的源码级结论是：无证书时签名流程提前返回，`winCodeSign` **不会**被下载，但仍会下 Electron / NSIS / 7zip 工具包。
 
 ## 6. 对 spec（票 45）的直接影响
 
-- 体积账要按 **Electron 运行时解包 367.6 MB + `dist/` 87.9 MB** 来算，NSIS 走压缩流，`≤250 MB` 软目标**没有被否定**。
-- 资源路径策略按 **`dist/assets/<哈希>.gz` + `base='/'`** 写死；`base='./'` 是备用（本票两条都验过，都通）。**别在 spec 里写 `/3DLUT/`** —— 那个目录不在产物里。
-- 协议配方直接抄第 4 节 A3；渲染进程不开 Node 能力这条 ADR 结论在本票里没有被推翻。
-- 需要往 spec 里加一条**已知限制**：`showDirectoryPicker` 至少要一次用户手势；无手势时抛 `SecurityError`（code 18），与用户取消的 `AbortError` 是两回事，产品要分开处理（现有 `useFolderOpener.ts`/`file-browser.ts` 只处理了 `AbortError`，`SecurityError` 会走到 `setError` 那条分支 —— 这是本票发现的一处**产品侧待确认行为**，不在本票范围内，已在此记录）。
+- **体积账要改正一处口径**：本票早期记的「`dist/` 87.9 MB」里混进了**探针专用夹具** —— `public/samples/相册-中文/` 下那两份 18 MB 的 DNG 副本（为中文那两项加的，**不在 main 上**）。真正属于产品的是 34 个 `.cube.gz` 的 **50,557,094 B（48.22 MiB）**，加上 JS/CSS/HTML/wasm/worker 之后 `dist/` 在 **52 MB 量级**。NSIS 走压缩流，`≤250 MB` 软目标没有被否定。
+- 资源路径策略按 **`dist/assets/<哈希>.gz` + `base='/'`** 写死；`base='./'` 也能用（本票两轮都验过），唯一差别是「根绝对」那一形态。**别在 spec 里写 `/3DLUT/`** —— 那个目录不在产物里。
+- 协议配方直接抄第 4 节 A3。渲染进程不开 Node 能力这条 ADR 结论在本票里没有被推翻。
+- **`--no-sandbox` 与 `handleResultPost` 那个补丁都是本机环境的产物，不是产品要求**：spec 里只能把它们写成「本票证据的采集条件」，不能写成实现约束。
+- 需要往 spec 里加一条**已知限制**：`showDirectoryPicker` 至少要一次用户手势；无手势时抛 `SecurityError`（code 18），与用户取消的 `AbortError` 是两回事，产品要分开处理（现有 `useFolderOpener.ts` / `file-browser.ts` 只处理了 `AbortError`，`SecurityError` 会走到 `setError` 那条分支 —— 这是本票发现的一处**产品侧待确认行为**，不在本票范围内，已在此记录，spec 里也留了位置）。
+- spec 已成文：[`docs/spec-windows-installer.md`](../../docs/spec-windows-installer.md)。
 
 ## 7. 证据索引
 

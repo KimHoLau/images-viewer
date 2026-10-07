@@ -13,6 +13,7 @@ npm test             # 单元测试
 npm run typecheck    # 类型检查
 npm run lint         # 代码检查
 npm run lut:pack     # 把 3DLUT/ 里的官方 .cube 预压缩成 .cube.gz
+npm run pack:win     # 出 Windows 安装版与便携 zip（见「Windows 桌面版」）
 ```
 
 `3DLUT/` 下的原始 `.cube` 是厂商素材（34 个文件 216 MB），不随仓库分发，`.gitignore` 已经排除；
@@ -306,6 +307,36 @@ node scripts/verify-export-exif.mjs          # --keep 保留产物，自己拿�
 - **没有做帧率对比**：票 #21 要求测 Log 模式开/关的渲染帧率。Log 分支只多了几次
   `log2`/`pow` 与两次 3×3 矩阵乘，理论上开销在噪声量级，但仓库里没有稳定的无头计时基准，
   量出来的数字不可复现，所以宁可不写。真实 WebGL 那套检查覆盖的是正确性，不是性能。
+
+## Windows 桌面版
+
+同一份 `src/` 有两个出口：网页版（GitHub Pages）与 Windows 桌面版（Electron 壳）。桌面版完全离线可用，
+34 个官方 LUT 全部随包；只出 64 位 Windows（Win10 1809+ / Win11），行为与网页版一致。
+
+下载在 [Releases](https://github.com/KimHoLau/raw-images-studio/releases)：
+
+- `raw-images-studio-<version>-win-x64-setup.exe` —— 安装版，装到当前用户，**不需要管理员权限**
+- `raw-images-studio-<version>-win-x64-portable.zip` —— 便携版，解压即用
+
+**这个包没有代码签名**：第一次运行会看到 SmartScreen 的「Windows protected your PC」，
+点「更多信息」→「仍要运行」即可。每个新版本都要重新攒一次声誉 —— 这是不做签名的代价，不是文件损坏。
+
+用户数据在 `%APPDATA%\raw-images-studio`（目前只有缩略图缓存）。**卸载不会删它**；要清干净就手动删这个目录。
+便携版的用户数据也落在同一个位置，所以它不是「绿色版」。
+
+本地出包：
+
+```bash
+npm run pack:win     # = npm run build:desktop && electron-builder --win --x64 --publish never
+```
+
+发版：推一个等于 `v<package.json version>` 的 tag，`.github/workflows/release-windows.yml` 会出两个产物
+加一份 `SHA256SUMS.txt`，并建一个 **draft** Release 等你确认后再发布。
+
+每一处决定的取值与理由在 [`docs/spec-windows-installer.md`](docs/spec-windows-installer.md)；
+外壳选型在 [`docs/adr/0001-windows-desktop-shell.md`](docs/adr/0001-windows-desktop-shell.md)；
+一手取证在 [`research/electron-shell-spike.md`](research/electron-shell-spike.md) 与
+[`research/electron-builder-release-facts.md`](research/electron-builder-release-facts.md)。
 
 ## 部署
 
