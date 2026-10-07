@@ -50,11 +50,13 @@
 - **【官方文档】不要用 `file://` 兜底。** Electron 官方 `protocol` 文档给出的全部示例都是注册自定义 scheme + `protocol.handle`，文档里明确说明 non-standard scheme「会表现得像 `file` 协议，但不能解析相对 URL」，并且「非 standard scheme 默认禁用 web storage（localStorage/sessionStorage/IndexedDB/cookies）」、「不能通过 FileSystem API 访问文件，渲染进程会抛 scheme 安全错误」。来源：[Electron `protocol` 文档](https://www.electronjs.org/docs/latest/api/protocol)。
   - 对本项目的直接含义：`file://` 下 IndexedDB 与 File System Access 都会受限，而这两样本项目都在用。
 - **【官方文档】标准做法 = `protocol.registerSchemesAsPrivileged` + `protocol.handle`。** 官方示例给的 privileges 组合是 `{ standard: true, secure: true, supportFetchAPI: true }`，并在 `app.whenReady()` 之后 `protocol.handle('app', ...)` 用 `net.fetch(pathToFileURL(pathToServe).toString())` 把文件喂回去。来源：[Electron `protocol` 文档 · `protocol.handle`](https://www.electronjs.org/docs/latest/api/protocol#protocolhandlescheme-handler)。
-- **【官方文档】privileges 各字段的官方定义**（同一页 `registerSchemesAsPrivileged` 一节）：
+- **【官方文档】privileges 各字段的官方定义**（[Electron `protocol` 文档 · `registerSchemesAsPrivileged`](https://www.electronjs.org/docs/latest/api/protocol#protocolregisterschemesasprivilegedcustomschemes)，字段清单以官方类型定义 [docs/api/structures/custom-scheme.md](https://github.com/electron/electron/blob/main/docs/api/structures/custom-scheme.md) 为准，**全部默认 `false`**）：
   - `standard`：遵守 RFC 3986 的 generic URI syntax，**只有 standard scheme 才能正确解析相对 URL 与绝对路径资源**；也才能用 File System API、才默认启用 localStorage/IndexedDB/cookies。
-  - `secure`：当作安全上下文（本条页面正文未逐字展开，但官方示例固定带上；`supportFetchAPI` 之外的意义见第 5 节待补）。
+  - `secure`：当作安全上下文（官方 custom-scheme 定义里只有「默认 false」，具体语义在本报告核实范围内**未找到一句官方展开**）。
   - `supportFetchAPI`：允许对该 scheme 使用 fetch API —— **这一条正是本项目 LUT 取数的开关**。
-  - `bypassCSP`、`stream`、`allowServiceWorkers`、`codeCache` 等：官方文档列出并逐个解释（`stream` 是 `<video>/<audio>` 需要的）。
+  - `corsEnabled`：允许 CORS 请求走这个 scheme（官方类型定义原文只有「Default false」）。
+  - `bypassCSP`、`stream`、`allowServiceWorkers`、`codeCache`、`allowExtensions`：官方逐个列出。其中 `stream` 是 `<video>/<audio>` 需要的（`protocol` 文档正文说明：`<video>`/`<audio>` 默认期望协议缓冲整个响应，`stream: true` 才按流式处理）；`codeCache` 只在 `standard: true` 时生效。
+  - **对本项目的建议组合**（依据上表，需 spike 验证）：`{ standard: true, secure: true, supportFetchAPI: true }`（官方示例原文就是这个组合）。**不要**图省事加 `bypassCSP: true`——那等于自己把 CSP 关掉。
 - **【官方文档】比 `protocol.handle` 更省事的新 API：`protocol.registerSource`（Experimental）。** 官方描述：一个 scheme 只服务应用自带文件时用它，「没有请求会碰到主线程，主进程忙不忙都不影响页面和子资源的加载速度」，并且「像 `file:` URL 一样流式发送，**包括从 asar 归档里读**，Content-Type 按扩展名推断」。官方示例里 `routes` 支持 `match: { host, path }` + `source: { type: 'directory', root }`，还可带自定义响应头。来源：[Electron `protocol` 文档 · `protocol.registerSource`](https://www.electronjs.org/docs/latest/api/protocol#protocolregistersourcescheme-source-experimental)。
 
 ### 1.2 Electron + 自定义 scheme 的一个必须 spike 的细节：`import.meta.glob` 产出的是 `/assets/...` 绝对路径
@@ -72,7 +74,7 @@
 
 - **【官方文档/官方 issue】Windows 上前端页面的 origin 是 `http://tauri.localhost`。** 证据：tauri-apps/tauri 官方 issue #13262「Asset Paths Rewritten to `http://tauri.localhost/` in Production Build (Tauri v2 + Vite + Vue3 on Windows)」，标题与正文即把 `http://tauri.localhost/` 作为生产构建下的实际 origin 讨论。来源：[tauri-apps/tauri#13262](https://github.com/tauri-apps/tauri/issues/13262)。
 - **【官方文档】`app.windows[].useHttpsScheme` 决定用 `https` 还是 `http` scheme，默认 `false`。** 源码级证据：`WindowConfig::use_https_scheme: bool`，serde 别名为 `use-https-scheme`，`WindowConfig::default()` 里 `use_https_scheme: false`。并且官方注释给了一条对本项目**很关键**的警告：「Changing this value between releases will change the IndexedDB, cookies and localstorage location and your app will not be able to access the old data.」来源：[tauri-apps/tauri `crates/tauri-utils/src/config.rs` · `WindowConfig`](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-utils/src/config.rs)。**对本项目的含义：本项目用 IndexedDB（`useHttpsScheme` 一改，老数据就读不到了），所以这个开关一旦定下就不能再翻。**
-  - **仍未核实：** 官方配置参考页对 `useHttpsScheme` 的表述、以及 v1 的 `dangerousUseHttpScheme` 到 v2 的迁移对照（本报告只从源码确认了 v2 的字段名与默认值）。
+  - **仍未核实：** 官方配置参考页对 `useHttpsScheme` 的完整表述（本报告只从源码确认了 v2 的字段名、别名为 `use-https-scheme`、默认 `false`，以及上面那条 IndexedDB 警告）；v1 的 `dangerousUseHttpScheme` 到 v2 的迁移对照也未核实。
 - **推论（**需 spike 确认**）：origin 是 `http://tauri.localhost` 这种真正的 http scheme，那么 `fetch('./assets/x.cube.gz')` 属于同源相对路径请求，不符合「被 CORS 拦掉」的条件；48 MB 文件的取数在协议层应当直接可用。**但** Tauri v2 的 CSP 与 asset 协议 scope 是否额外限制，见第 5 节。**本报告未找到「Tauri 前端资源在 `http://tauri.localhost` 下 fetch 相对路径」的官方正面表述**，只有 issue #13262 对 origin 的旁证，因此这条仍属待验证。
 
 ---
