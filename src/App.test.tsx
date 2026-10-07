@@ -5,6 +5,6 @@ import App from './App';
 describe('App', () => {
   it('renders the root element', () => {
     render(<App />);
-    expect(screen.getByText('Images Viewer')).toBeInTheDocument();
+    expect(screen.getByText('Raw Images Studio')).toBeInTheDocument();
   });
 });

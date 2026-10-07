@@ -1,4 +1,4 @@
-# Images Viewer
+# Raw Images Studio
 
 一款浏览器里的图片查看器：支持 RAW 解码、LUT 调色、基础调整与导出，Lightroom 风格暗色界面。
 全部处理都在客户端完成，图片不上传。
@@ -256,7 +256,14 @@ chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=90000 \
 
 推送到 `main` 会触发 `.github/workflows/deploy.yml`：跑类型检查、Lint、测试、构建，
 然后发布到 GitHub Pages。构建时 `GITHUB_ACTIONS` 环境变量会让 Vite 把资源路径前缀设成
-`/images-viewer/`（项目页路径），本地构建仍是根路径。
+`/raw-images-studio/`（项目页路径），本地构建仍是根路径。
 
 Pages 已启用（Source = **GitHub Actions**，`build_type: workflow`），推 `main` 即发布到
-<https://kimholau.github.io/images-viewer/>。
+<https://kimholau.github.io/raw-images-studio/>。
+
+> 仓库在 2026-10-07 由 `images-viewer` 改名为 `raw-images-studio`。GitHub **不会**重定向
+> Pages 的项目页地址（[改名文档](https://docs.github.com/en/repositories/creating-and-managing-repositories/renaming-a-repository)
+> 把 project site URLs 列为自动重定向的唯一例外），所以旧地址
+> <https://kimholau.github.io/images-viewer/> 已失效；issue、git 远端与 API 仍由 GitHub 自动重定向。
+
+改名对 Pages 的完整取证见 [`research/pages-rename.md`](research/pages-rename.md)。

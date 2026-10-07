@@ -8,7 +8,7 @@ import topLevelAwait from 'vite-plugin-top-level-await';
  * 资源路径必须带上仓库名前缀，否则 JS/WASM/Worker 全部 404。
  * 本地开发与 CI 之外的构建保持根路径。
  */
-const base = process.env.GITHUB_ACTIONS ? '/images-viewer/' : '/';
+const base = process.env.GITHUB_ACTIONS ? '/raw-images-studio/' : '/';
 
 // https://vite.dev/config/
 export default defineConfig({
