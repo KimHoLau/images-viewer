@@ -1,4 +1,5 @@
 # Raw Images Studio
+![image](https://github.com/KimHoLau/raw-images-studio/blob/main/preview.png)
 
 一款浏览器里的图片查看器：支持 RAW 解码、LUT 调色、基础调整与导出，Lightroom 风格暗色界面。
 全部处理都在客户端完成，图片不上传。
