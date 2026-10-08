@@ -3,7 +3,7 @@
 一款图片处理工具：支持 RAW 解码、Log色彩转换、官方3D LUT套用、基础调整与导出，Lightroom 风格暗色界面。
 全部处理都在客户端完成，图片不上传。
 
-##系统架构图
+## 系统架构图
 ![image](https://github.com/KimHoLau/raw-images-studio/blob/main/architecture.png)
 
 ## 快速开始
